@@ -1,0 +1,7 @@
+package com.adaptivelearning.support.application;
+
+import com.adaptivelearning.support.domain.UserEntity;import com.adaptivelearning.support.infrastructure.UserMapper;import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;import lombok.RequiredArgsConstructor;import org.springframework.beans.factory.annotation.Value;import org.springframework.boot.CommandLineRunner;import org.springframework.security.crypto.password.PasswordEncoder;import org.springframework.stereotype.Component;import java.util.UUID;
+@Component @RequiredArgsConstructor public class AdminInitializer implements CommandLineRunner {
+ private final UserMapper users;private final PasswordEncoder encoder;@Value("${APP_ADMIN_USERNAME:admin}")private String username;@Value("${APP_ADMIN_EMAIL:admin@example.com}")private String email;@Value("${APP_ADMIN_PASSWORD:}")private String password;
+ public void run(String...args){if(password==null||password.isBlank())return;UserEntity existing=users.selectOne(new LambdaQueryWrapper<UserEntity>().eq(UserEntity::getUsername,username));if(existing!=null)return;UserEntity u=new UserEntity();u.setPublicId(UUID.randomUUID().toString());u.setUsername(username);u.setEmail(email.toLowerCase());u.setPasswordHash(encoder.encode(password));u.setStatus("ACTIVE");u.setTimezone("Asia/Shanghai");u.setLoginFailedCount(0);users.insert(u);Long role=users.findRoleId("ADMIN");users.addRole(u.getId(),role);}
+}

@@ -1,0 +1,2 @@
+package com.adaptivelearning.evaluation.domain;import com.baomidou.mybatisplus.annotation.*;import lombok.Getter;import lombok.Setter;import java.time.*;
+@Getter @Setter @TableName("study_report") public class StudyReportEntity {@TableId(type=IdType.ASSIGN_ID)private Long id;private String publicId;private Long userId;private String type;private LocalDate periodStart;private LocalDate periodEnd;private String timezone;private Integer revisionNo;private String metricSnapshotJson;private String narrative;private Long modelRunId;private String status;private Instant createdAt;}

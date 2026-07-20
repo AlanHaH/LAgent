@@ -1,0 +1,15 @@
+.idea/
+.vscode/
+*.iml
+*.log
+.DS_Store
+Thumbs.db
+.env
+!.env.example
+backend/target/
+frontend/node_modules/
+frontend/dist/
+frontend/*.tsbuildinfo
+.m2repo/
+data/
+uploads/

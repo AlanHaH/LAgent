@@ -1,0 +1,2 @@
+package com.adaptivelearning.support.infrastructure;import com.adaptivelearning.support.domain.*;import com.baomidou.mybatisplus.core.mapper.BaseMapper;import org.apache.ibatis.annotations.Mapper;
+public final class NotificationMappers {private NotificationMappers(){}@Mapper public interface NotificationMapper extends BaseMapper<NotificationEntity>{}@Mapper public interface NotificationPreferenceMapper extends BaseMapper<NotificationPreferenceEntity>{}}

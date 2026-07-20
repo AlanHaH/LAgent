@@ -1,0 +1,3 @@
+package com.adaptivelearning.knowledgebase.domain;
+import com.baomidou.mybatisplus.annotation.*;import lombok.Getter;import lombok.Setter;import java.time.Instant;
+@Getter @Setter @TableName("knowledge_chunk") public class KnowledgeChunkEntity {@TableId(type=IdType.ASSIGN_ID)private Long id;private Long documentVersionId;private Integer chunkNo;private String text;private String textHash;private Integer tokenCount;private String titlePathJson;private Integer pageFrom;private Integer pageTo;private Integer paragraphFrom;private Integer paragraphTo;private String vectorJson;private Instant createdAt;}

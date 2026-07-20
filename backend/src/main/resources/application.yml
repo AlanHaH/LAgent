@@ -1,0 +1,80 @@
+spring:
+  application:
+    name: adaptive-learning
+  autoconfigure:
+    exclude: org.springframework.boot.autoconfigure.security.servlet.UserDetailsServiceAutoConfiguration
+  datasource:
+    url: ${DB_URL:jdbc:mysql://localhost:3306/adaptive_learning?useUnicode=true&characterEncoding=utf8&serverTimezone=UTC&allowPublicKeyRetrieval=true&useSSL=false}
+    username: ${DB_USERNAME:learning}
+    password: ${DB_PASSWORD:change-me}
+    hikari:
+      maximum-pool-size: 20
+      minimum-idle: 2
+  flyway:
+    enabled: true
+    locations: classpath:db/migration/mysql
+  servlet:
+    multipart:
+      max-file-size: 50MB
+      max-request-size: 52MB
+  jackson:
+    default-property-inclusion: non_null
+    time-zone: UTC
+  data:
+    redis:
+      host: ${REDIS_HOST:localhost}
+      port: ${REDIS_PORT:6379}
+      timeout: 2s
+
+server:
+  port: ${SERVER_PORT:8080}
+  shutdown: graceful
+  error:
+    include-message: never
+
+mybatis-plus:
+  configuration:
+    map-underscore-to-camel-case: true
+  global-config:
+    db-config:
+      id-type: assign_id
+      logic-delete-field: deletedAt
+      logic-delete-value: now()
+      logic-not-delete-value: 'null'
+
+app:
+  security:
+    jwt-secret: ${JWT_SECRET:local-development-secret-change-before-production-123456}
+    access-token-minutes: ${ACCESS_TOKEN_MINUTES:15}
+    refresh-token-days: ${REFRESH_TOKEN_DAYS:30}
+    login-max-failures: 5
+    login-lock-minutes: 15
+  planning:
+    capacity-ratio: 0.85
+    confirmation-minutes: 30
+    high-impact-task-threshold: 3
+    impact-window-days: 14
+    max-task-minutes: 120
+  storage:
+    root: ${STORAGE_ROOT:./data/objects}
+  rag:
+    chunk-target-chars: 600
+    chunk-max-chars: 1600
+    top-k: 5
+  cors:
+    allowed-origins: ${CORS_ALLOWED_ORIGINS:http://localhost:5173}
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics,prometheus
+  endpoint:
+    health:
+      show-details: when_authorized
+
+springdoc:
+  swagger-ui:
+    path: /swagger-ui.html
+  api-docs:
+    path: /v3/api-docs

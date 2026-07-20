@@ -1,0 +1,77 @@
+package com.adaptivelearning.knowledgebase.application;
+
+import com.adaptivelearning.knowledgebase.domain.*;
+import com.adaptivelearning.knowledgebase.infrastructure.KnowledgeMappers.*;
+import com.adaptivelearning.shared.exception.BusinessException;
+import com.adaptivelearning.shared.exception.ErrorCode;
+import com.adaptivelearning.shared.security.SecurityUtils;
+import com.adaptivelearning.support.application.AuditService;
+import com.adaptivelearning.support.application.HashingService;
+import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import lombok.RequiredArgsConstructor;
+import org.apache.tika.Tika;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
+import org.springframework.web.multipart.MultipartFile;
+
+import java.io.*;
+import java.nio.file.*;
+import java.security.MessageDigest;
+import java.security.SecureRandom;
+import java.time.*;
+import java.util.*;
+
+@Service @RequiredArgsConstructor
+public class KnowledgeDocumentService {
+  private final SpaceMapper spaceMapper;private final StoredObjectMapper objectMapperDb;private final DocumentMapper documentMapper;private final DocumentVersionMapper versionMapper;private final ChunkMapper chunkMapper;private final DocumentJobMapper jobMapper;private final DocumentDeletionTokenMapper deletionMapper;
+  private final FileSecurityScanner scanner;private final DocumentChunker chunker;private final TextVectorizer vectorizer;private final HashingService hashing;private final ObjectMapper json;private final AuditService audit;private final SecureRandom random=new SecureRandom();
+  @Value("${app.storage.root:./data/objects}")private String storageRoot;@Value("${app.rag.chunk-target-chars:600}")private int targetChars;@Value("${app.rag.chunk-max-chars:1600}")private int maxChars;
+  public record DocumentDetail(KnowledgeDocumentEntity document,List<DocumentVersionEntity> versions,List<DocumentJobEntity> jobs){}
+  public record DeleteToken(String token,Instant expiresAt){}
+
+  public List<KnowledgeSpaceEntity> spaces(){long user=SecurityUtils.currentUserId();return spaceMapper.selectList(new LambdaQueryWrapper<KnowledgeSpaceEntity>().and(q->q.eq(KnowledgeSpaceEntity::getUserId,user).or().eq(KnowledgeSpaceEntity::getVisibility,"PUBLIC")).eq(KnowledgeSpaceEntity::getStatus,"ACTIVE").orderByAsc(KnowledgeSpaceEntity::getName));}
+  public KnowledgeSpaceEntity space(String id){return accessibleSpace(id);}
+  public KnowledgeSpaceEntity createSpace(String name,Long directionId){if(name==null||name.isBlank()||name.length()>120)bad("知识空间名称不合法");KnowledgeSpaceEntity s=new KnowledgeSpaceEntity();s.setPublicId(UUID.randomUUID().toString());s.setUserId(SecurityUtils.currentUserId());s.setName(name.trim());s.setVisibility("PRIVATE");s.setStatus("ACTIVE");s.setDirectionId(directionId);spaceMapper.insert(s);return s;}
+  public KnowledgeSpaceEntity updateSpace(String id,String name,Long directionId,Integer version){KnowledgeSpaceEntity s=ownedSpace(id);if(version==null||!version.equals(s.getVersion()))conflict();if(name!=null&&!name.isBlank())s.setName(name.trim());s.setDirectionId(directionId);if(spaceMapper.updateById(s)!=1)conflict();return ownedSpace(id);}
+  public List<KnowledgeDocumentEntity> documents(String spaceId){KnowledgeSpaceEntity s=accessibleSpace(spaceId);return documentMapper.selectList(new LambdaQueryWrapper<KnowledgeDocumentEntity>().eq(KnowledgeDocumentEntity::getSpaceId,s.getId()).eq(!"PUBLIC".equals(s.getVisibility()),KnowledgeDocumentEntity::getOwnerUserId,SecurityUtils.currentUserId()).orderByDesc(KnowledgeDocumentEntity::getCreatedAt));}
+
+  public KnowledgeDocumentEntity upload(String spaceId,MultipartFile file){KnowledgeSpaceEntity s=ownedSpace(spaceId);return store(s,null,file);}
+  public KnowledgeDocumentEntity replace(String documentId,MultipartFile file){KnowledgeDocumentEntity d=ownedDocument(documentId);KnowledgeSpaceEntity s=ownedSpaceById(d.getSpaceId());return store(s,d,file);}
+
+  private KnowledgeDocumentEntity store(KnowledgeSpaceEntity space,KnowledgeDocumentEntity existing,MultipartFile file){if(file==null||file.isEmpty())bad("上传文件不能为空");if(file.getSize()>50L*1024*1024)throw new BusinessException(ErrorCode.FILE_SIZE_EXCEEDED,"单文件不能超过 50 MB");
+    Path root=Path.of(storageRoot).toAbsolutePath().normalize();String objectKey=SecurityUtils.currentUserId()+"/"+UUID.randomUUID();Path target=root.resolve(objectKey).normalize();if(!target.startsWith(root))bad("非法对象路径");
+    try{Files.createDirectories(target.getParent());try(InputStream in=file.getInputStream()){Files.copy(in,target,StandardCopyOption.REPLACE_EXISTING);}String detected=scanner.verify(target,file.getOriginalFilename(),file.getContentType());String hash=fileHash(target);
+      StoredObjectEntity stored=new StoredObjectEntity();stored.setOwnerUserId(SecurityUtils.currentUserId());stored.setObjectKey(objectKey);stored.setOriginalFileName(cleanName(file.getOriginalFilename()));stored.setMimeType(detected);stored.setFileSize(file.getSize());stored.setFileHash(hash);stored.setScanStatus("CLEAN");objectMapperDb.insert(stored);
+      KnowledgeDocumentEntity doc=existing;if(doc==null){doc=new KnowledgeDocumentEntity();doc.setPublicId(UUID.randomUUID().toString());doc.setSpaceId(space.getId());doc.setOwnerUserId(SecurityUtils.currentUserId());doc.setDisplayName(cleanName(file.getOriginalFilename()));doc.setStatus("UPLOADED");doc.setActiveVersionNo(1);doc.setVisibility(space.getVisibility());documentMapper.insert(doc);}else{doc.setActiveVersionNo(doc.getActiveVersionNo()+1);doc.setStatus("UPLOADED");documentMapper.updateById(doc);}
+      DocumentVersionEntity version=new DocumentVersionEntity();version.setDocumentId(doc.getId());version.setVersionNo(doc.getActiveVersionNo());version.setStoredObjectId(stored.getId());version.setParserVersion("tika-3.0");version.setChunkConfigJson(toJson(Map.of("targetChars",targetChars,"maxChars",maxChars,"overlapMax",100)));version.setEmbeddingModel("LOCAL_HASHED_128");version.setEmbeddingDimension(128);version.setStatus("UPLOADED");version.setFileHash(hash);version.setCreatedAt(Instant.now());versionMapper.insert(version);
+      DocumentJobEntity job=new DocumentJobEntity();job.setPublicId(UUID.randomUUID().toString());job.setDocumentVersionId(version.getId());job.setJobType("FULL_PIPELINE");job.setStatus("RUNNING");job.setIdempotencyKey("doc-"+version.getId()+"-full");job.setAttempts(1);job.setCreatedAt(Instant.now());job.setUpdatedAt(Instant.now());jobMapper.insert(job);
+      process(doc,version,stored,target,job);audit.record("DOCUMENT_UPLOAD","KNOWLEDGE_DOCUMENT",doc.getPublicId(),null,"file="+stored.getOriginalFileName()+",hash="+hash,"SUCCESS");return ownedDocument(doc.getPublicId());
+    }catch(BusinessException e){try{Files.deleteIfExists(target);}catch(IOException ignored){}throw e;}catch(Exception e){try{Files.deleteIfExists(target);}catch(IOException ignored){}throw new BusinessException(ErrorCode.SERVICE_TEMPORARILY_UNAVAILABLE,"文件保存或解析失败",Map.of("reason",e.getClass().getSimpleName()));}}
+
+  private void process(KnowledgeDocumentEntity doc,DocumentVersionEntity version,StoredObjectEntity stored,Path path,DocumentJobEntity job){try{doc.setStatus("SECURITY_CHECKING");documentMapper.updateById(doc);doc.setStatus("PARSING");documentMapper.updateById(doc);version.setStatus("PARSING");versionMapper.updateById(version);
+      String text=new Tika().parseToString(path.toFile());if(text==null||text.trim().length()<10){version.setStatus("PARSE_FAILED");doc.setStatus("PARSE_FAILED");versionMapper.updateById(version);documentMapper.updateById(doc);job.setStatus("FAILED");job.setErrorCode("DOCUMENT_NO_EXTRACTABLE_TEXT");job.setErrorMessage("文档没有可提取文本，扫描 PDF 需要 OCR");job.setUpdatedAt(Instant.now());jobMapper.updateById(job);return;}
+      version.setTextHash(hashing.sha256(text));version.setStatus("CHUNKING");versionMapper.updateById(version);doc.setStatus("CHUNKING");documentMapper.updateById(doc);List<String>chunks=chunker.chunk(text,targetChars,maxChars);if(chunks.isEmpty())throw new IllegalStateException("no chunks");
+      chunkMapper.delete(new LambdaQueryWrapper<KnowledgeChunkEntity>().eq(KnowledgeChunkEntity::getDocumentVersionId,version.getId()));int no=1;for(String value:chunks){KnowledgeChunkEntity c=new KnowledgeChunkEntity();c.setDocumentVersionId(version.getId());c.setChunkNo(no++);c.setText(value);c.setTextHash(hashing.sha256(value));c.setTokenCount(Math.max(1,value.length()/2));c.setTitlePathJson("[]");c.setParagraphFrom(c.getChunkNo());c.setParagraphTo(c.getChunkNo());c.setVectorJson(toJson(vectorizer.vector(value)));c.setCreatedAt(Instant.now());chunkMapper.insert(c);}
+      version.setStatus("INDEXED");versionMapper.updateById(version);doc.setStatus("INDEXED");documentMapper.updateById(doc);job.setStatus("SUCCEEDED");job.setUpdatedAt(Instant.now());jobMapper.updateById(job);
+    }catch(Exception e){version.setStatus("INDEX_FAILED");versionMapper.updateById(version);doc.setStatus("INDEX_FAILED");documentMapper.updateById(doc);job.setStatus("FAILED");job.setErrorCode("DOCUMENT_PROCESSING_FAILED");job.setErrorMessage(e.getClass().getSimpleName());job.setUpdatedAt(Instant.now());jobMapper.updateById(job);}}
+
+  public DocumentDetail detail(String id){KnowledgeDocumentEntity d=ownedOrPublicDocument(id);List<DocumentVersionEntity>vs=versionMapper.selectList(new LambdaQueryWrapper<DocumentVersionEntity>().eq(DocumentVersionEntity::getDocumentId,d.getId()).orderByDesc(DocumentVersionEntity::getVersionNo));List<Long>ids=vs.stream().map(DocumentVersionEntity::getId).toList();List<DocumentJobEntity>jobs=ids.isEmpty()?List.of():jobMapper.selectList(new LambdaQueryWrapper<DocumentJobEntity>().in(DocumentJobEntity::getDocumentVersionId,ids).orderByDesc(DocumentJobEntity::getCreatedAt));return new DocumentDetail(d,vs,jobs);}
+  public KnowledgeDocumentEntity retry(String id){KnowledgeDocumentEntity d=ownedDocument(id);DocumentVersionEntity v=versionMapper.selectOne(new LambdaQueryWrapper<DocumentVersionEntity>().eq(DocumentVersionEntity::getDocumentId,d.getId()).eq(DocumentVersionEntity::getVersionNo,d.getActiveVersionNo()));StoredObjectEntity o=objectMapperDb.selectById(v.getStoredObjectId());DocumentJobEntity job=new DocumentJobEntity();job.setPublicId(UUID.randomUUID().toString());job.setDocumentVersionId(v.getId());job.setJobType("RETRY");job.setStatus("RUNNING");job.setIdempotencyKey("doc-"+v.getId()+"-retry-"+UUID.randomUUID());job.setAttempts(1);job.setCreatedAt(Instant.now());job.setUpdatedAt(Instant.now());jobMapper.insert(job);process(d,v,o,Path.of(storageRoot).toAbsolutePath().normalize().resolve(o.getObjectKey()),job);return ownedDocument(id);}
+
+  public DeleteToken deletionRequest(String id){KnowledgeDocumentEntity d=ownedDocument(id);byte[]bytes=new byte[40];random.nextBytes(bytes);String raw=Base64.getUrlEncoder().withoutPadding().encodeToString(bytes);DocumentDeletionTokenEntity t=new DocumentDeletionTokenEntity();t.setDocumentId(d.getId());t.setUserId(SecurityUtils.currentUserId());t.setTokenHash(hashing.sha256(raw));t.setStatus("PENDING");t.setExpiresAt(Instant.now().plus(Duration.ofMinutes(30)));t.setCreatedAt(Instant.now());deletionMapper.insert(t);return new DeleteToken(raw,t.getExpiresAt());}
+  @Transactional public void delete(String id,String rawToken){KnowledgeDocumentEntity d=ownedDocument(id);DocumentDeletionTokenEntity t=deletionMapper.selectOne(new LambdaQueryWrapper<DocumentDeletionTokenEntity>().eq(DocumentDeletionTokenEntity::getDocumentId,d.getId()).eq(DocumentDeletionTokenEntity::getUserId,SecurityUtils.currentUserId()).eq(DocumentDeletionTokenEntity::getTokenHash,hashing.sha256(rawToken==null?"":rawToken)).eq(DocumentDeletionTokenEntity::getStatus,"PENDING"));if(t==null||t.getExpiresAt().isBefore(Instant.now()))throw new BusinessException(ErrorCode.PLAN_CONFIRMATION_REQUIRED,"删除确认令牌无效或已过期");d.setStatus("DELETING");documentMapper.updateById(d);List<DocumentVersionEntity>vs=versionMapper.selectList(new LambdaQueryWrapper<DocumentVersionEntity>().eq(DocumentVersionEntity::getDocumentId,d.getId()));for(DocumentVersionEntity v:vs){chunkMapper.delete(new LambdaQueryWrapper<KnowledgeChunkEntity>().eq(KnowledgeChunkEntity::getDocumentVersionId,v.getId()));StoredObjectEntity o=objectMapperDb.selectById(v.getStoredObjectId());if(o!=null)try{Path root=Path.of(storageRoot).toAbsolutePath().normalize(),path=root.resolve(o.getObjectKey()).normalize();if(path.startsWith(root))Files.deleteIfExists(path);}catch(IOException ignored){}}
+    d.setStatus("PURGED");documentMapper.updateById(d);t.setStatus("USED");deletionMapper.updateById(t);audit.record("DOCUMENT_DELETE","KNOWLEDGE_DOCUMENT",id,"INDEXED","PURGED","SUCCESS");}
+
+  public KnowledgeSpaceEntity accessibleSpace(String id){KnowledgeSpaceEntity s=spaceMapper.selectOne(new LambdaQueryWrapper<KnowledgeSpaceEntity>().eq(KnowledgeSpaceEntity::getPublicId,id).and(q->q.eq(KnowledgeSpaceEntity::getUserId,SecurityUtils.currentUserId()).or().eq(KnowledgeSpaceEntity::getVisibility,"PUBLIC")));if(s==null)notFound();return s;}
+  public KnowledgeSpaceEntity ownedSpace(String id){KnowledgeSpaceEntity s=spaceMapper.selectOne(new LambdaQueryWrapper<KnowledgeSpaceEntity>().eq(KnowledgeSpaceEntity::getPublicId,id).eq(KnowledgeSpaceEntity::getUserId,SecurityUtils.currentUserId()));if(s==null)notFound();return s;}
+  private KnowledgeSpaceEntity ownedSpaceById(long id){KnowledgeSpaceEntity s=spaceMapper.selectOne(new LambdaQueryWrapper<KnowledgeSpaceEntity>().eq(KnowledgeSpaceEntity::getId,id).eq(KnowledgeSpaceEntity::getUserId,SecurityUtils.currentUserId()));if(s==null)notFound();return s;}
+  public KnowledgeDocumentEntity ownedDocument(String id){KnowledgeDocumentEntity d=documentMapper.selectOne(new LambdaQueryWrapper<KnowledgeDocumentEntity>().eq(KnowledgeDocumentEntity::getPublicId,id).eq(KnowledgeDocumentEntity::getOwnerUserId,SecurityUtils.currentUserId()));if(d==null)notFound();return d;}
+  private KnowledgeDocumentEntity ownedOrPublicDocument(String id){KnowledgeDocumentEntity d=documentMapper.selectOne(new LambdaQueryWrapper<KnowledgeDocumentEntity>().eq(KnowledgeDocumentEntity::getPublicId,id).and(q->q.eq(KnowledgeDocumentEntity::getOwnerUserId,SecurityUtils.currentUserId()).or().eq(KnowledgeDocumentEntity::getVisibility,"PUBLIC")));if(d==null)notFound();return d;}
+  private String fileHash(Path path)throws Exception{MessageDigest md=MessageDigest.getInstance("SHA-256");try(InputStream in=Files.newInputStream(path)){byte[]b=new byte[8192];for(int n;(n=in.read(b))>0;)md.update(b,0,n);}return HexFormat.of().formatHex(md.digest());}
+  private String cleanName(String n){String v=n==null?"document":n.replace("\\","_").replace("/","_").replaceAll("[\\p{Cntrl}]","").trim();return v.substring(0,Math.min(255,v.length()));}
+  private String toJson(Object v){try{return json.writeValueAsString(v);}catch(JsonProcessingException e){throw new IllegalStateException(e);}}
+  private void bad(String m){throw new BusinessException(ErrorCode.COMMON_VALIDATION_ERROR,m);}private void conflict(){throw new BusinessException(ErrorCode.RESOURCE_VERSION_CONFLICT,"资源版本冲突，请刷新后重试");}private void notFound(){throw new BusinessException(ErrorCode.RESOURCE_NOT_FOUND,"资源不存在");}
+}
