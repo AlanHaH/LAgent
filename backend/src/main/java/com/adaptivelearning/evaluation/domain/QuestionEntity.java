@@ -1,2 +1,18 @@
-package com.adaptivelearning.evaluation.domain;import com.adaptivelearning.shared.domain.BaseEntity;import com.baomidou.mybatisplus.annotation.TableName;import lombok.Getter;import lombok.Setter;
-@Getter @Setter @TableName("question") public class QuestionEntity extends BaseEntity {private String publicId;private Long ownerUserId;private String visibility;private Integer currentVersionNo;private String status;private String sourceType;}
+package com.adaptivelearning.evaluation.domain;
+
+import com.adaptivelearning.shared.domain.BaseEntity;
+import com.baomidou.mybatisplus.annotation.TableName;
+import lombok.Getter;
+import lombok.Setter;
+
+@Getter
+@Setter
+@TableName("question")
+public class QuestionEntity extends BaseEntity {
+    private String publicId;
+    private Long ownerUserId;
+    private String visibility;
+    private Integer currentVersionNo;
+    private String status;
+    private String sourceType;
+}

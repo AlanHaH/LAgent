@@ -3,15 +3,42 @@ import { computed, onMounted, ref } from 'vue'
 import MarkdownIt from 'markdown-it'
 import DOMPurify from 'dompurify'
 import { ElMessage } from 'element-plus'
-import { api } from '../api/http'
+import { api, postSse } from '../api/http'
 const md=new MarkdownIt({html:false,linkify:true,breaks:true}), spaces=ref<any[]>([]), selectedSpaces=ref<string[]>([]), sessions=ref<any[]>([]), current=ref<any>(), messages=ref<any[]>([]), input=ref(''), asking=ref(false)
 const canAsk=computed(()=>input.value.trim()&&selectedSpaces.value.length)
 onMounted(async()=>{[spaces.value,sessions.value]=await Promise.all([api<any[]>({url:'/knowledge-spaces'}),api<any[]>({url:'/qa-sessions'})]);selectedSpaces.value=spaces.value.map(x=>x.publicId);if(sessions.value[0])await open(sessions.value[0])})
-async function open(s:any){current.value=s;messages.value=await api<any[]>({url:`/qa-sessions/${s.publicId}/messages`})}
+function messageView(value:any){return value?.message?{...value.message,citations:value.citations||[]}:value}
+async function open(s:any){current.value=s;messages.value=(await api<any[]>({url:`/qa-sessions/${s.publicId}/messages`})).map(messageView)}
 async function ensure(){if(current.value)return;current.value=await api<any>({method:'POST',url:'/qa-sessions',data:{title:'学习问答',spaceIds:selectedSpaces.value}});sessions.value.unshift(current.value)}
-async function ask(){if(!canAsk.value)return;await ensure();const content=input.value;input.value='';messages.value.push({role:'USER',content,citations:[]});asking.value=true;try{const r=await api<any>({method:'POST',url:`/qa-sessions/${current.value.publicId}/messages`,headers:{Accept:'application/json'},data:{content}});messages.value.push(r.assistantMessage);if(r.refused)ElMessage.warning('资料中没有足够证据，系统已拒绝臆测')}finally{asking.value=false}}
+async function ask(){
+  if(!canAsk.value)return
+  await ensure()
+  const content=input.value
+  input.value=''
+  messages.value.push({role:'USER',content,citations:[]})
+  const assistant:any={role:'ASSISTANT',content:'',citations:[],generating:true}
+  messages.value.push(assistant)
+  asking.value=true
+  try{
+    await postSse(`/qa-sessions/${current.value.publicId}/messages`,{content},({event,data})=>{
+      if(event==='message.delta')assistant.content+=data?.delta||''
+      else if(event==='message.replaced')assistant.content=data?.content||''
+      else if(event==='citation.ready')assistant.citations.push({...data,citationCode:data?.citationCode||data?.citationId})
+      else if(event==='message.completed'){
+        const final=messageView(data?.assistantMessage)
+        Object.assign(assistant,final,{generating:false})
+        if(data?.evidenceSufficient===false)ElMessage.warning('资料中没有足够证据，系统已拒绝臆测')
+      }else if(event==='message.failed')throw new Error(data?.message||'回答生成失败')
+    })
+    if(assistant.generating)throw new Error('回答流意外中断，请重试')
+  }catch(error:any){
+    if(!assistant.content)assistant.content=`回答生成失败：${error?.message||'请稍后重试'}`
+    assistant.generating=false
+    ElMessage.error(error?.message||'回答生成失败')
+  }finally{asking.value=false}
+}
 function html(s:string){return DOMPurify.sanitize(md.render(s||''))}
 async function rate(m:any,rating:number){await api({method:'PUT',url:`/qa-messages/${m.publicId}/feedback`,data:{rating,reasonCode:rating>3?'HELPFUL':'NEEDS_IMPROVEMENT',comment:''}});ElMessage.success('反馈已记录')}
 </script>
-<template><div class="qa-shell"><aside class="panel qa-side"><el-button type="primary" class="full" @click="current=undefined;messages=[]">＋ 新对话</el-button><h4>历史对话</h4><button v-for="s in sessions" :key="s.publicId" :class="{active:s.publicId===current?.publicId}" @click="open(s)">{{s.title||'未命名对话'}}</button><h4>检索范围</h4><el-checkbox-group v-model="selectedSpaces" class="space-checks"><el-checkbox v-for="s in spaces" :key="s.publicId" :value="s.publicId">{{s.name}}</el-checkbox></el-checkbox-group></aside><section class="panel chat"><div class="chat-head"><div><h3>基于证据的学习问答</h3><p>每个结论都应带引用；没有证据时明确拒答。</p></div><span class="tag">RAG</span></div><div class="messages"><div v-if="!messages.length" class="qa-welcome"><span>问</span><h3>从你的资料开始提问</h3><p>试试：“用三个要点解释这个概念，并指出出处。”</p></div><div v-for="(m,i) in messages" :key="m.publicId||i" :class="['message',String(m.role).toLowerCase()]"><div class="avatar">{{m.role==='USER'?'我':'序'}}</div><div class="bubble"><div class="markdown" v-html="html(m.content)"/><div v-if="m.citations?.length" class="citations"><b>引用依据</b><button v-for="(c,n) in m.citations" :key="n">[{{n+1}}] {{c.documentName||c.title}} · 片段 {{c.chunkIndex??c.sequenceNo}}</button></div><div v-if="m.role!=='USER'" class="feedback"><span>这条回答有帮助吗？</span><button @click="rate(m,5)">有帮助</button><button @click="rate(m,2)">需改进</button></div></div></div><div v-if="asking" class="message assistant"><div class="avatar">序</div><div class="bubble typing">正在检索并核对引用…</div></div></div><div class="composer"><el-input v-model="input" type="textarea" autosize placeholder="输入问题，Ctrl + Enter 发送" @keydown.ctrl.enter.prevent="ask"/><el-button type="primary" :loading="asking" :disabled="!canAsk" @click="ask">发送</el-button></div></section></div></template>
+<template><div class="qa-shell"><aside class="panel qa-side"><el-button type="primary" class="full" @click="current=undefined;messages=[]">＋ 新对话</el-button><h4>历史对话</h4><button v-for="s in sessions" :key="s.publicId" :class="{active:s.publicId===current?.publicId}" @click="open(s)">{{s.title||'未命名对话'}}</button><h4>检索范围</h4><el-checkbox-group v-model="selectedSpaces" class="space-checks"><el-checkbox v-for="s in spaces" :key="s.publicId" :value="s.publicId">{{s.name}}</el-checkbox></el-checkbox-group></aside><section class="panel chat"><div class="chat-head"><div><h3>基于证据的学习问答</h3><p>每个结论都应带引用；没有证据时明确拒答。</p></div><span class="tag">RAG</span></div><div class="messages"><div v-if="!messages.length" class="qa-welcome"><span>问</span><h3>从你的资料开始提问</h3><p>试试：“用三个要点解释这个概念，并指出出处。”</p></div><div v-for="(m,i) in messages" :key="m.publicId||i" :class="['message',String(m.role).toLowerCase()]"><div class="avatar">{{m.role==='USER'?'我':'序'}}</div><div class="bubble"><div v-if="m.generating&&!m.content" class="typing">正在检索并核对引用…</div><div v-else class="markdown" v-html="html(m.content)"/><div v-if="m.citations?.length" class="citations"><b>引用依据</b><button v-for="c in m.citations" :key="c.citationCode">[{{c.citationCode}}] 资料片段 #{{c.chunkId}}</button></div><div v-if="m.role!=='USER'&&!m.generating&&m.publicId" class="feedback"><span>这条回答有帮助吗？</span><button @click="rate(m,5)">有帮助</button><button @click="rate(m,2)">需改进</button></div></div></div></div><div class="composer"><el-input v-model="input" type="textarea" autosize placeholder="输入问题，Ctrl + Enter 发送" @keydown.ctrl.enter.prevent="ask"/><el-button type="primary" :loading="asking" :disabled="!canAsk" @click="ask">发送</el-button></div></section></div></template>
 <style scoped>.qa-shell{display:grid;grid-template-columns:255px 1fr;gap:18px;height:calc(100vh - 150px)}.qa-side{padding:14px;overflow:auto}.qa-side h4{font-size:11px;color:var(--muted);letter-spacing:.12em;margin:24px 8px 8px}.qa-side>button:not(.el-button){width:100%;border:0;background:transparent;text-align:left;padding:10px;border-radius:8px;color:#56625a}.qa-side>button.active{background:#e7efe9;color:var(--green)}.space-checks{display:flex;flex-direction:column;padding:0 8px}.chat{padding:0;display:flex;flex-direction:column;min-height:0}.chat-head{padding:18px 22px;border-bottom:1px solid var(--line);display:flex;justify-content:space-between}.chat-head h3,.chat-head p{margin:0}.chat-head p{font-size:11px;color:var(--muted);margin-top:4px}.messages{flex:1;overflow:auto;padding:22px}.qa-welcome{text-align:center;padding:12vh 0;color:var(--muted)}.qa-welcome span{display:grid;place-items:center;margin:auto;width:55px;height:55px;border-radius:18px;background:var(--green);color:#fff;font:24px 'DM Serif Display'}.qa-welcome h3{color:var(--ink)}.message{display:flex;gap:11px;margin-bottom:20px}.message.user{flex-direction:row-reverse}.avatar{display:grid;place-items:center;width:34px;height:34px;border-radius:10px;background:#dceae0;color:var(--green);font-weight:700;flex:none}.message.user .avatar{background:#e9e2d6;color:#6c583b}.bubble{max-width:80%;background:#eef2ed;border-radius:4px 14px 14px 14px;padding:12px 15px;line-height:1.7;font-size:13px}.message.user .bubble{background:#173d31;color:#fff;border-radius:14px 4px 14px 14px}.citations{border-top:1px solid #d6ddd7;margin-top:12px;padding-top:10px}.citations b,.citations button{display:block}.citations b{font-size:10px;letter-spacing:.1em}.citations button{border:0;background:transparent;color:var(--green);font-size:10px;padding:5px 0;text-align:left}.feedback{font-size:10px;color:var(--muted);margin-top:8px}.feedback button{border:0;background:transparent;color:var(--green)}.composer{display:grid;grid-template-columns:1fr auto;gap:10px;padding:16px;border-top:1px solid var(--line)}@media(max-width:800px){.qa-shell{grid-template-columns:1fr;height:auto}.qa-side{display:none}.chat{min-height:70vh}}</style>

@@ -14,6 +14,7 @@ public class UserEntity extends BaseEntity {
     private String publicId;
     private String username;
     private String email;
+    private Instant emailVerifiedAt;
     private String passwordHash;
     private String status;
     private String timezone;
@@ -21,4 +22,3 @@ public class UserEntity extends BaseEntity {
     private Instant lockedUntil;
     private Instant lastLoginAt;
 }
-

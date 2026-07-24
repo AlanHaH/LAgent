@@ -2,15 +2,22 @@ package com.adaptivelearning.profile.api;
 
 import com.adaptivelearning.profile.application.AvailabilityPolicy;
 import com.adaptivelearning.profile.application.ProfileService;
+import com.adaptivelearning.profile.application.ProfileInterviewService;
+import com.adaptivelearning.profile.application.ProfileInterviewStreamService;
 import com.adaptivelearning.profile.domain.ProfileGenerationJobEntity;
 import com.adaptivelearning.profile.domain.ProfileVersionEntity;
 import com.adaptivelearning.profile.domain.SelfAssessmentEntity;
 import com.adaptivelearning.shared.api.ApiResponse;
+import com.adaptivelearning.shared.security.SecurityUtils;
+import com.adaptivelearning.shared.web.RequestIdFilter;
+import jakarta.servlet.http.HttpServletRequest;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.*;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.HttpStatus;
+import org.springframework.http.MediaType;
 import org.springframework.web.bind.annotation.*;
+import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
 import java.math.BigDecimal;
 import java.time.LocalDate;
@@ -23,11 +30,15 @@ import java.util.Map;
 @RequiredArgsConstructor
 public class ProfileController {
     private final ProfileService service;
+    private final ProfileInterviewService interviewService;
+    private final ProfileInterviewStreamService interviewStreamService;
 
     public record DirectionRequest(Long directionId, @Size(max=120) String customDirection,
                                    @NotBlank @Size(max=80) String currentStage, boolean primary) {}
     public record ProfileRequest(@NotBlank String timezone, @Min(1) @Max(7) int weekStart,
-                                 @Min(1) @Max(365) int planPeriodDays, @Size(max=2000) String backgroundText,
+                                 @Min(1) @Max(365) Integer planPeriodDays,
+                                 LocalDate planStartDate, LocalDate planEndDate,
+                                 @Size(max=2000) String backgroundText,
                                  @NotEmpty List<@Valid DirectionRequest> directions, Integer version) {}
     public record PreferenceRequest(@NotEmpty List<String> contentModes, @NotBlank String guidanceStyle,
                                     @NotBlank String taskGranularity, @Min(10) @Max(180) int focusMinutes,
@@ -39,12 +50,52 @@ public class ProfileController {
     public record ExceptionRequest(@Min(0) @Max(960) int availableMinutes, @Size(max=500) String reason) {}
     public record SelfAssessmentRequest(@NotNull Long knowledgePointId, @Min(0) @Max(5) int level,
                                         LocalDate lastStudiedAt, @Size(max=1000) String note) {}
+    public record InterviewStartRequest(Boolean restart) {}
+    public record InterviewMessageRequest(@NotBlank @Size(max=2000) String content, @NotNull Integer version) {}
+    public record InterviewConfirmRequest(@NotNull Integer version) {}
 
     @GetMapping public ApiResponse<ProfileService.ProfileView> get() { return ApiResponse.ok(service.get()); }
 
+    @GetMapping("/interview-sessions/active")
+    public ApiResponse<ProfileInterviewService.SessionView> activeInterview() {
+        return ApiResponse.ok(interviewService.active());
+    }
+
+    @PostMapping("/interview-sessions") @ResponseStatus(HttpStatus.CREATED)
+    public ApiResponse<ProfileInterviewService.SessionView> startInterview(
+            @RequestBody(required = false) InterviewStartRequest request) {
+        return ApiResponse.ok(interviewService.start(request != null && Boolean.TRUE.equals(request.restart())));
+    }
+
+    @GetMapping("/interview-sessions/{sessionId}")
+    public ApiResponse<ProfileInterviewService.SessionView> interview(@PathVariable String sessionId) {
+        return ApiResponse.ok(interviewService.get(sessionId));
+    }
+
+    @PostMapping("/interview-sessions/{sessionId}/messages")
+    public ApiResponse<ProfileInterviewService.SessionView> interviewMessage(@PathVariable String sessionId,
+            @Valid @RequestBody InterviewMessageRequest request) {
+        return ApiResponse.ok(interviewService.addMessage(sessionId, request.content(), request.version()));
+    }
+
+    @PostMapping(value = "/interview-sessions/{sessionId}/messages",
+            produces = MediaType.TEXT_EVENT_STREAM_VALUE + ";charset=UTF-8")
+    public SseEmitter interviewMessageStream(@PathVariable String sessionId,
+            @Valid @RequestBody InterviewMessageRequest request, HttpServletRequest servletRequest) {
+        return interviewStreamService.stream(SecurityUtils.currentUserId(), RequestIdFilter.currentRequestId(),
+                clientIp(servletRequest), sessionId, request.content(), request.version());
+    }
+
+    @PostMapping("/interview-sessions/{sessionId}/confirmation")
+    public ApiResponse<ProfileInterviewService.ConfirmationView> confirmInterview(@PathVariable String sessionId,
+            @Valid @RequestBody InterviewConfirmRequest request) {
+        return ApiResponse.ok(interviewService.confirm(sessionId, request.version()));
+    }
+
     @PutMapping public ApiResponse<ProfileService.ProfileView> save(@Valid @RequestBody ProfileRequest r) {
         return ApiResponse.ok(service.save(new ProfileService.ProfileInput(r.timezone(), r.weekStart(), r.planPeriodDays(),
-                r.backgroundText(), r.directions().stream().map(d -> new ProfileService.DirectionInput(d.directionId(),
+                r.planStartDate(), r.planEndDate(), r.backgroundText(),
+                r.directions().stream().map(d -> new ProfileService.DirectionInput(d.directionId(),
                 d.customDirection(), d.currentStage(), d.primary())).toList(), r.version())));
     }
 
@@ -75,4 +126,9 @@ public class ProfileController {
 
     @GetMapping("/generation-jobs/{jobId}")
     public ApiResponse<ProfileGenerationJobEntity> job(@PathVariable String jobId) { return ApiResponse.ok(service.getJob(jobId)); }
+
+    private String clientIp(HttpServletRequest request) {
+        String forwarded = request.getHeader("X-Forwarded-For");
+        return forwarded == null ? request.getRemoteAddr() : forwarded.split(",")[0].trim();
+    }
 }

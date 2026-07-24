@@ -1,2 +1,22 @@
-package com.adaptivelearning.execution.domain;import com.adaptivelearning.shared.domain.BaseEntity;import com.baomidou.mybatisplus.annotation.TableName;import lombok.Getter;import lombok.Setter;import java.time.Instant;
-@Getter @Setter @TableName("tutoring_session") public class TutoringSessionEntity extends BaseEntity {private String publicId;private Long userId;private Long taskId;private String mode;private String status;private String knowledgeScopeJson;private Instant startedAt;private Instant endedAt;}
+package com.adaptivelearning.execution.domain;
+
+import com.adaptivelearning.shared.domain.BaseEntity;
+import com.baomidou.mybatisplus.annotation.TableName;
+import lombok.Getter;
+import lombok.Setter;
+
+import java.time.Instant;
+
+@Getter
+@Setter
+@TableName("tutoring_session")
+public class TutoringSessionEntity extends BaseEntity {
+    private String publicId;
+    private Long userId;
+    private Long taskId;
+    private String mode;
+    private String status;
+    private String knowledgeScopeJson;
+    private Instant startedAt;
+    private Instant endedAt;
+}

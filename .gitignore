@@ -10,6 +10,12 @@ backend/target/
 frontend/node_modules/
 frontend/dist/
 frontend/*.tsbuildinfo
+ai-service/.venv/
+ai-service/.pytest_cache/
+ai-service/.ruff_cache/
+ai-service/.mypy_cache/
+ai-service/**/__pycache__/
+ai-service/data/
 .m2repo/
 data/
 uploads/

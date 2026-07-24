@@ -29,6 +29,39 @@ services:
       timeout: 3s
       retries: 12
 
+  qdrant:
+    image: qdrant/qdrant:v1.15.4
+    restart: unless-stopped
+    volumes: ["qdrant-data:/qdrant/storage"]
+
+  ai-service:
+    build: ./ai-service
+    restart: unless-stopped
+    environment:
+      AI_ENV: production
+      AI_INTERNAL_TOKEN: ${AI_INTERNAL_TOKEN:?set AI_INTERNAL_TOKEN in .env}
+      AI_MODEL_ENABLED: ${MODEL_ENABLED:-true}
+      AI_MODEL_BASE_URL: ${MODEL_BASE_URL:-}
+      AI_MODEL_API_KEY: ${MODEL_API_KEY:-}
+      AI_MODEL_NAME: ${MODEL_NAME:-}
+      AI_MODEL_MAX_OUTPUT_TOKENS: ${MODEL_MAX_OUTPUT_TOKENS:-1200}
+      AI_MODEL_THINKING: ${MODEL_THINKING:-disabled}
+      AI_EMBEDDING_PROVIDER: ${AI_EMBEDDING_PROVIDER:-sentence_transformers}
+      AI_EMBEDDING_MODEL: ${AI_EMBEDDING_MODEL:-BAAI/bge-small-zh-v1.5}
+      AI_EMBEDDING_DEVICE: ${AI_EMBEDDING_DEVICE:-cpu}
+      AI_ALLOW_HASH_FALLBACK: ${AI_ALLOW_HASH_FALLBACK:-true}
+      AI_QDRANT_MODE: server
+      AI_QDRANT_URL: http://qdrant:6333
+      AI_EXPOSE_DOCS: "false"
+    volumes: ["embedding-cache:/home/aiuser/.cache"]
+    depends_on:
+      qdrant: { condition: service_started }
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8090/health/live', timeout=3)"]
+      interval: 15s
+      timeout: 5s
+      retries: 20
+
   backend:
     build: ./backend
     restart: unless-stopped
@@ -38,15 +71,30 @@ services:
       DB_PASSWORD: ${MYSQL_PASSWORD}
       REDIS_HOST: redis
       JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET in .env}
+      VERIFICATION_CODE_PEPPER: ${VERIFICATION_CODE_PEPPER:-${JWT_SECRET}}
       STORAGE_ROOT: /app/data/objects
       APP_ADMIN_USERNAME: ${APP_ADMIN_USERNAME:-admin}
       APP_ADMIN_EMAIL: ${APP_ADMIN_EMAIL:-admin@example.com}
       APP_ADMIN_PASSWORD: ${APP_ADMIN_PASSWORD:-}
-      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-http://localhost:8088}
+      MAIL_HOST: ${MAIL_HOST:-}
+      MAIL_PORT: ${MAIL_PORT:-587}
+      MAIL_USERNAME: ${MAIL_USERNAME:-}
+      MAIL_PASSWORD: ${MAIL_PASSWORD:-}
+      MAIL_FROM: ${MAIL_FROM:-${MAIL_USERNAME:-}}
+      MAIL_AUTH_ENABLED: ${MAIL_AUTH_ENABLED:-true}
+      MAIL_STARTTLS_ENABLED: ${MAIL_STARTTLS_ENABLED:-true}
+      MAIL_SSL_ENABLED: ${MAIL_SSL_ENABLED:-false}
+      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-http://localhost:8088,http://127.0.0.1:8088}
+      MODEL_NAME: ${MODEL_NAME:-}
+      AI_SERVICE_ENABLED: ${AI_SERVICE_ENABLED:-true}
+      AI_SERVICE_BASE_URL: http://ai-service:8090
+      AI_INTERNAL_TOKEN: ${AI_INTERNAL_TOKEN:?set AI_INTERNAL_TOKEN in .env}
+      AI_SERVICE_TIMEOUT: ${AI_SERVICE_TIMEOUT:-PT65S}
     volumes: ["object-data:/app/data"]
     depends_on:
       mysql: { condition: service_healthy }
       redis: { condition: service_healthy }
+      ai-service: { condition: service_healthy }
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8080/actuator/health | grep -q UP"]
       interval: 15s
@@ -64,3 +112,5 @@ volumes:
   mysql-data:
   redis-data:
   object-data:
+  qdrant-data:
+  embedding-cache:

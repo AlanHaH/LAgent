@@ -15,5 +15,6 @@ public final class ProfileMappers {
     @Mapper public interface SelfAssessmentMapper extends BaseMapper<SelfAssessmentEntity> {}
     @Mapper public interface ProfileVersionMapper extends BaseMapper<ProfileVersionEntity> {}
     @Mapper public interface ProfileGenerationJobMapper extends BaseMapper<ProfileGenerationJobEntity> {}
+    @Mapper public interface ProfileInterviewSessionMapper extends BaseMapper<ProfileInterviewSessionEntity> {}
+    @Mapper public interface ProfileInterviewMessageMapper extends BaseMapper<ProfileInterviewMessageEntity> {}
 }
-

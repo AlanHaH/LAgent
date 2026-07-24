@@ -8,6 +8,7 @@ import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.access.AccessDeniedException;
 import org.springframework.web.bind.MethodArgumentNotValidException;
+import org.springframework.http.converter.HttpMessageNotReadableException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
 
@@ -38,6 +39,12 @@ public class GlobalExceptionHandler {
                 ex.getMessage(), Map.of(), List.of()));
     }
 
+    @ExceptionHandler(HttpMessageNotReadableException.class)
+    ResponseEntity<ErrorResponse> unreadable(HttpMessageNotReadableException ex) {
+        return ResponseEntity.badRequest().body(ErrorResponse.of(ErrorCode.COMMON_VALIDATION_ERROR.name(),
+                "请求内容格式不正确", Map.of(), List.of()));
+    }
+
     @ExceptionHandler(AccessDeniedException.class)
     ResponseEntity<ErrorResponse> denied() {
         return ResponseEntity.status(HttpStatus.FORBIDDEN).body(ErrorResponse.of(
@@ -57,4 +64,3 @@ public class GlobalExceptionHandler {
                 "COMMON_INTERNAL_ERROR", "服务暂时无法处理请求", Map.of(), List.of()));
     }
 }
-

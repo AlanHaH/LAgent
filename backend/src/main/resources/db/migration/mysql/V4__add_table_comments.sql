@@ -1,0 +1,90 @@
+ALTER TABLE `sys_user` COMMENT = '系统用户账号表，保存登录身份、邮箱、密码摘要、账号状态和审计字段';
+ALTER TABLE `sys_role` COMMENT = '系统角色表，定义管理员、普通用户等权限角色';
+ALTER TABLE `sys_permission` COMMENT = '系统权限表，定义后端资源和操作权限编码';
+ALTER TABLE `sys_user_role` COMMENT = '用户角色关联表，维护用户与角色的多对多关系';
+ALTER TABLE `sys_role_permission` COMMENT = '角色权限关联表，维护角色与权限的多对多关系';
+ALTER TABLE `refresh_token` COMMENT = '刷新令牌表，保存登录续期令牌摘要、设备和失效信息';
+
+ALTER TABLE `learning_direction` COMMENT = '学习方向字典表，维护课程领域、主题分类和层级方向';
+ALTER TABLE `knowledge_point` COMMENT = '知识点字典表，维护学习方向下的知识点、难度和层级结构';
+ALTER TABLE `knowledge_dependency` COMMENT = '知识点依赖表，描述前置知识点和后续知识点的关系';
+ALTER TABLE `user_profile` COMMENT = '用户学习画像主表，保存目标周期、每日时间、偏好和画像状态';
+ALTER TABLE `user_profile_direction` COMMENT = '用户画像方向关联表，记录用户关注的学习方向及优先级';
+ALTER TABLE `profile_version` COMMENT = '用户画像版本表，保存画像变更快照和生成来源';
+ALTER TABLE `learning_preference` COMMENT = '学习偏好表，保存节奏、内容形式、提醒方式等个性化配置';
+ALTER TABLE `availability_rule` COMMENT = '可学习时间规则表，描述用户每周固定可学习时间段';
+ALTER TABLE `availability_exception` COMMENT = '可学习时间例外表，记录某天额外可学或不可学的时间安排';
+ALTER TABLE `self_assessment` COMMENT = '自我评估表，保存用户对基础、能力和信心的主观评估';
+ALTER TABLE `profile_generation_job` COMMENT = '画像生成任务表，记录AI生成或更新画像的异步任务状态';
+ALTER TABLE `profile_interview_session` COMMENT = '画像访谈会话表，记录AI引导收集用户画像信息的会话状态和草稿';
+ALTER TABLE `profile_interview_message` COMMENT = '画像访谈消息表，保存用户与AI围绕画像补全的对话消息';
+
+ALTER TABLE `learning_goal` COMMENT = '学习目标表，保存用户想达成的学习目标、期限、优先级和状态';
+ALTER TABLE `learning_project` COMMENT = '学习项目表，承载目标拆解后的项目化学习任务集合';
+ALTER TABLE `goal_project` COMMENT = '目标项目关联表，维护学习目标与学习项目之间的关联关系';
+ALTER TABLE `milestone` COMMENT = '里程碑表，记录学习项目中的阶段成果、计划日期和完成状态';
+
+ALTER TABLE `learning_plan` COMMENT = '学习计划主表，保存用户目标对应的计划概览、状态和当前版本';
+ALTER TABLE `planning_job` COMMENT = '计划生成任务表，记录AI规划、重规划和校验的异步执行状态';
+ALTER TABLE `plan_version` COMMENT = '计划版本表，保存每次生成或调整后的学习计划快照';
+ALTER TABLE `plan_stage` COMMENT = '计划阶段表，描述学习计划中的阶段划分、顺序和时间范围';
+ALTER TABLE `plan_change_item` COMMENT = '计划变更明细表，记录计划版本之间的具体调整项';
+ALTER TABLE `plan_validation_result` COMMENT = '计划校验结果表，保存时间可行性、负载和依赖校验结果';
+ALTER TABLE `plan_confirmation` COMMENT = '计划确认表，记录用户对计划版本的确认、拒绝或反馈';
+ALTER TABLE `plan_publication` COMMENT = '计划发布表，记录计划版本发布为可执行任务的状态';
+
+ALTER TABLE `learning_task` COMMENT = '学习任务表，保存每日或阶段学习任务、排期、状态和完成信息';
+ALTER TABLE `task_dependency` COMMENT = '任务依赖表，描述任务之间的前置和后续执行关系';
+ALTER TABLE `task_knowledge_point` COMMENT = '任务知识点关联表，标记学习任务覆盖的知识点';
+ALTER TABLE `task_status_history` COMMENT = '任务状态历史表，记录任务状态变更轨迹和原因';
+ALTER TABLE `task_schedule_history` COMMENT = '任务排期历史表，记录任务计划时间调整前后的变化';
+ALTER TABLE `study_session` COMMENT = '学习会话表，记录用户针对任务的学习计时、开始结束和完成情况';
+ALTER TABLE `study_session_pause` COMMENT = '学习会话暂停表，记录学习计时过程中的暂停和恢复区间';
+ALTER TABLE `study_note` COMMENT = '学习笔记表，保存用户在学习任务或文档中的笔记内容';
+ALTER TABLE `study_note_version` COMMENT = '学习笔记版本表，保存笔记编辑历史和内容快照';
+ALTER TABLE `task_completion_summary` COMMENT = '任务完成总结表，记录任务完成后的学习总结、困难和AI反馈';
+ALTER TABLE `tutoring_session` COMMENT = 'AI辅导会话表，记录用户围绕任务进行AI辅导的会话信息';
+ALTER TABLE `tutoring_message` COMMENT = 'AI辅导消息表，保存辅导会话中的用户问题和AI回答';
+
+ALTER TABLE `knowledge_space` COMMENT = '知识空间表，保存用户文档知识库空间及其归属方向';
+ALTER TABLE `resource_category` COMMENT = '资源分类表，维护知识库内文档资源的分类层级';
+ALTER TABLE `stored_object` COMMENT = '存储对象表，保存上传文件的对象键、原始文件名、大小和哈希信息';
+ALTER TABLE `knowledge_document` COMMENT = '知识文档表，保存用户上传文档的业务信息、状态和当前版本';
+ALTER TABLE `document_version` COMMENT = '文档版本表，保存文档解析版本、切分配置、嵌入模型和文件哈希';
+ALTER TABLE `knowledge_chunk` COMMENT = '知识片段表，保存文档切分后的文本块、位置和向量检索相关信息';
+ALTER TABLE `document_job` COMMENT = '文档处理任务表，记录解析、切分、向量化等异步任务状态';
+ALTER TABLE `document_deletion_token` COMMENT = '文档删除令牌表，记录删除确认令牌及过期状态';
+ALTER TABLE `qa_session` COMMENT = '文档问答会话表，记录用户基于知识库提问的会话上下文';
+ALTER TABLE `qa_message` COMMENT = '文档问答消息表，保存问答会话中的问题、回答和模型调用信息';
+ALTER TABLE `qa_citation` COMMENT = '问答引用表，记录AI回答引用的文档片段、排序和匹配分数';
+ALTER TABLE `qa_feedback` COMMENT = '问答反馈表，记录用户对AI回答的评分、原因和意见';
+
+ALTER TABLE `question` COMMENT = '题目表，保存测验题目的基础信息、题型、难度和状态';
+ALTER TABLE `question_version` COMMENT = '题目版本表，保存题干、选项、答案解析等题目内容快照';
+ALTER TABLE `question_knowledge_point` COMMENT = '题目知识点关联表，标记题目考察的知识点及权重';
+ALTER TABLE `assessment` COMMENT = '测验表，保存一次测验的来源、范围、状态和配置';
+ALTER TABLE `assessment_question` COMMENT = '测验题目关联表，维护测验中的题目顺序和分值';
+ALTER TABLE `assessment_attempt` COMMENT = '测验作答记录表，保存用户一次提交的得分、耗时和批改状态';
+ALTER TABLE `attempt_answer` COMMENT = '作答答案表，保存用户对单题的答案、得分和批改反馈';
+ALTER TABLE `grading_record` COMMENT = '批改记录表，记录自动批改或人工批改过程和结果';
+ALTER TABLE `wrong_question` COMMENT = '错题表，记录用户错题、订正状态和复习安排';
+ALTER TABLE `assessment_appeal` COMMENT = '测验申诉表，记录用户对批改结果的申诉和处理状态';
+ALTER TABLE `mastery_evidence` COMMENT = '掌握度证据表，记录作答、任务完成等用于评估掌握度的证据';
+ALTER TABLE `knowledge_mastery` COMMENT = '知识点掌握度表，保存用户对各知识点的当前掌握水平和更新时间';
+ALTER TABLE `mastery_snapshot` COMMENT = '掌握度快照表，保存某一时间点的知识点掌握度历史快照';
+ALTER TABLE `daily_study_stat` COMMENT = '每日学习统计表，汇总用户每天学习时长、任务和测验表现';
+ALTER TABLE `study_report` COMMENT = '学习报告表，保存周期性学习报告、摘要和建议';
+ALTER TABLE `optimization_request` COMMENT = '学习优化请求表，记录基于表现触发的计划优化或重规划请求';
+
+ALTER TABLE `idempotency_record` COMMENT = '幂等记录表，保存请求幂等键和响应摘要，避免重复提交';
+ALTER TABLE `model_provider_config` COMMENT = '模型供应商配置表，保存OpenAI兼容供应商、地址和密钥引用';
+ALTER TABLE `model_config` COMMENT = '模型配置表，保存具体模型名称、参数、能力和启用状态';
+ALTER TABLE `prompt_template` COMMENT = '提示词模板表，保存AI功能使用的提示词版本和模板内容';
+ALTER TABLE `model_run` COMMENT = '模型调用记录表，记录每次AI调用的输入输出摘要、耗时、令牌和状态';
+ALTER TABLE `agent_tool_call` COMMENT = 'Agent工具调用表，记录AI Agent执行外部工具时的参数和结果摘要';
+
+ALTER TABLE `notification` COMMENT = '通知表，保存系统提醒、学习提醒和消息发送状态';
+ALTER TABLE `notification_preference` COMMENT = '通知偏好表，保存用户通知渠道、频率和免打扰配置';
+ALTER TABLE `audit_log` COMMENT = '审计日志表，记录用户和系统关键操作的审计信息';
+ALTER TABLE `outbox_event` COMMENT = '事务消息表，保存待发布领域事件以支持异步一致性';
+ALTER TABLE `scheduled_job_lock` COMMENT = '定时任务锁表，用于防止多实例重复执行同一定时任务';

@@ -8,6 +8,7 @@ public enum ErrorCode {
     AUTH_TOKEN_EXPIRED(HttpStatus.UNAUTHORIZED),
     AUTH_INVALID_CREDENTIALS(HttpStatus.UNAUTHORIZED),
     AUTH_ACCOUNT_LOCKED(HttpStatus.LOCKED),
+    AUTH_VERIFICATION_CODE_INVALID(HttpStatus.BAD_REQUEST),
     AUTH_FORBIDDEN(HttpStatus.FORBIDDEN),
     RESOURCE_ACCESS_DENIED(HttpStatus.FORBIDDEN),
     RESOURCE_NOT_FOUND(HttpStatus.NOT_FOUND),
@@ -39,4 +40,3 @@ public enum ErrorCode {
         return status;
     }
 }
-

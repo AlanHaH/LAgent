@@ -1,0 +1,1 @@
+"""Goal recommendation domain."""

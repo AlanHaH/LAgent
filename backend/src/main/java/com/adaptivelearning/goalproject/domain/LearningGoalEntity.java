@@ -15,6 +15,9 @@ public class LearningGoalEntity extends BaseEntity {
     private Long userId;
     private Long directionId;
     private Long sourceGoalId;
+    private String sourceType;
+    private Long profileVersionId;
+    private String recommendationSnapshotJson;
     private String name;
     private String type;
     private String description;
@@ -26,4 +29,3 @@ public class LearningGoalEntity extends BaseEntity {
     private String successCriteriaJson;
     private String acceptanceSnapshotJson;
 }
-

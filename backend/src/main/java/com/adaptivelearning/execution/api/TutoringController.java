@@ -1,3 +1,39 @@
-package com.adaptivelearning.execution.api;import com.adaptivelearning.execution.application.TutoringService;import com.adaptivelearning.execution.domain.*;import com.adaptivelearning.shared.api.ApiResponse;import jakarta.validation.Valid;import jakarta.validation.constraints.*;import lombok.RequiredArgsConstructor;import org.springframework.web.bind.annotation.*;import java.util.List;
-@RestController @RequestMapping("/api/v1") @RequiredArgsConstructor public class TutoringController {private final TutoringService service;public record StartRequest(@NotBlank String mode,List<String>spaceIds){}public record MessageRequest(@NotBlank@Size(max=10000)String content,boolean allowFinalAnswer){}
- @PostMapping("/tasks/{id}/tutoring-sessions")public ApiResponse<TutoringSessionEntity>start(@PathVariable String id,@Valid@RequestBody StartRequest r){return ApiResponse.ok(service.start(id,r.mode(),r.spaceIds()));}@PostMapping("/tutoring-sessions/{id}/messages")public ApiResponse<TutoringMessageEntity>ask(@PathVariable String id,@Valid@RequestBody MessageRequest r){return ApiResponse.ok(service.ask(id,r.content(),r.allowFinalAnswer()));}@GetMapping("/tutoring-sessions/{id}")public ApiResponse<TutoringService.SessionView>get(@PathVariable String id){return ApiResponse.ok(service.get(id));}}
+package com.adaptivelearning.execution.api;
+
+import com.adaptivelearning.execution.application.TutoringService;
+import com.adaptivelearning.execution.domain.*;
+import com.adaptivelearning.shared.api.ApiResponse;
+import jakarta.validation.Valid;
+import jakarta.validation.constraints.*;
+import lombok.RequiredArgsConstructor;
+import org.springframework.web.bind.annotation.*;
+
+import java.util.List;
+
+@RestController
+@RequestMapping("/api/v1")
+@RequiredArgsConstructor
+public class TutoringController {
+    private final TutoringService service;
+
+    public record StartRequest(@NotBlank String mode, List<String> spaceIds) {
+    }
+
+    public record MessageRequest(@NotBlank @Size(max = 10000) String content, boolean allowFinalAnswer) {
+    }
+
+    @PostMapping("/tasks/{id}/tutoring-sessions")
+    public ApiResponse<TutoringSessionEntity> start(@PathVariable String id, @Valid @RequestBody StartRequest r) {
+        return ApiResponse.ok(service.start(id, r.mode(), r.spaceIds()));
+    }
+
+    @PostMapping("/tutoring-sessions/{id}/messages")
+    public ApiResponse<TutoringMessageEntity> ask(@PathVariable String id, @Valid @RequestBody MessageRequest r) {
+        return ApiResponse.ok(service.ask(id, r.content(), r.allowFinalAnswer()));
+    }
+
+    @GetMapping("/tutoring-sessions/{id}")
+    public ApiResponse<TutoringService.SessionView> get(@PathVariable String id) {
+        return ApiResponse.ok(service.get(id));
+    }
+}

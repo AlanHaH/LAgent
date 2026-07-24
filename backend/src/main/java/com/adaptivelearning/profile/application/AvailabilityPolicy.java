@@ -8,6 +8,7 @@ import java.time.LocalTime;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
+import java.util.Set;
 
 public final class AvailabilityPolicy {
     private AvailabilityPolicy() {}
@@ -20,6 +21,9 @@ public final class AvailabilityPolicy {
         for (Slot slot : input) {
             if (slot.weekday() < 1 || slot.weekday() > 7 || slot.start() == null || slot.end() == null) {
                 throw new BusinessException(ErrorCode.COMMON_VALIDATION_ERROR, "可用时间字段不完整");
+            }
+            if (slot.energyLevel() != null && !Set.of("LOW", "MEDIUM", "HIGH").contains(slot.energyLevel())) {
+                throw new BusinessException(ErrorCode.COMMON_VALIDATION_ERROR, "精力等级不在允许范围内");
             }
             if (slot.start().equals(slot.end())) {
                 throw new BusinessException(ErrorCode.COMMON_VALIDATION_ERROR, "开始时间不能等于结束时间");
@@ -62,4 +66,3 @@ public final class AvailabilityPolicy {
                 energy == null ? "MEDIUM" : energy);
     }
 }
-

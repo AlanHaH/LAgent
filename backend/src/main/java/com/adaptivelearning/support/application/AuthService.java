@@ -30,6 +30,7 @@ public class AuthService {
     private final PasswordEncoder passwordEncoder;
     private final JwtService jwtService;
     private final HashingService hashingService;
+    private final EmailVerificationService emailVerificationService;
     private final SecureRandom random = new SecureRandom();
 
     @Value("${app.security.refresh-token-days:30}")
@@ -41,19 +42,23 @@ public class AuthService {
 
     public record TokenPair(String accessToken, String refreshToken, long expiresIn, UserView user) {}
     public record UserView(String publicId, String username, String email, String timezone,
-                           Set<String> roles, Set<String> permissions, int version) {}
+                           boolean emailVerified, Set<String> roles, Set<String> permissions, int version) {}
 
     @Transactional
-    public TokenPair register(String username, String email, String password, String deviceId) {
+    public TokenPair register(String username, String email, String password,
+                              String verificationCode, String deviceId) {
+        email = normalizeEmail(email);
         long existing = userMapper.selectCount(new LambdaQueryWrapper<UserEntity>()
                 .eq(UserEntity::getUsername, username).or().eq(UserEntity::getEmail, email));
         if (existing > 0) {
             throw new BusinessException(ErrorCode.RESOURCE_VERSION_CONFLICT, "用户名或邮箱已被使用");
         }
+        emailVerificationService.verifyAndConsume(email, EmailVerificationPurpose.REGISTER, verificationCode);
         UserEntity user = new UserEntity();
         user.setPublicId(UUID.randomUUID().toString());
         user.setUsername(username.trim());
-        user.setEmail(email.trim().toLowerCase());
+        user.setEmail(email);
+        user.setEmailVerifiedAt(Instant.now());
         user.setPasswordHash(passwordEncoder.encode(password));
         user.setStatus("ACTIVE");
         user.setTimezone("Asia/Shanghai");
@@ -67,11 +72,47 @@ public class AuthService {
         return issuePair(user, deviceId);
     }
 
+    public EmailVerificationService.DeliveryPolicy requestVerificationCode(
+            String rawEmail, EmailVerificationPurpose purpose) {
+        String email = normalizeEmail(rawEmail);
+        UserEntity existing = findByEmail(email);
+        if (purpose == EmailVerificationPurpose.REGISTER) {
+            if (existing != null) {
+                throw new BusinessException(ErrorCode.RESOURCE_VERSION_CONFLICT, "该邮箱已被注册");
+            }
+            return emailVerificationService.sendCode(email, purpose);
+        }
+        if (purpose == EmailVerificationPurpose.PASSWORD_RESET) {
+            // 对不存在的邮箱返回相同策略，避免泄露账户是否存在。
+            return existing == null ? emailVerificationService.deliveryPolicy()
+                    : emailVerificationService.sendCode(email, purpose);
+        }
+        throw new BusinessException(ErrorCode.COMMON_VALIDATION_ERROR, "不支持的验证码用途");
+    }
+
+    @Transactional
+    public void resetPassword(String rawEmail, String verificationCode, String newPassword) {
+        String email = normalizeEmail(rawEmail);
+        UserEntity user = findByEmail(email);
+        if (user == null || user.getEmailVerifiedAt() == null) {
+            throw new BusinessException(ErrorCode.AUTH_VERIFICATION_CODE_INVALID,
+                    "验证码无效或已过期，请重新获取");
+        }
+        emailVerificationService.verifyAndConsume(email, EmailVerificationPurpose.PASSWORD_RESET, verificationCode);
+        user.setPasswordHash(passwordEncoder.encode(newPassword));
+        user.setLoginFailedCount(0);
+        user.setLockedUntil(null);
+        if (userMapper.updateById(user) != 1) {
+            throw new BusinessException(ErrorCode.RESOURCE_VERSION_CONFLICT, "账户已发生变更，请重新操作");
+        }
+        logoutAll(user.getId());
+    }
+
     @Transactional
     public TokenPair login(String login, String password, String deviceId) {
         UserEntity user = userMapper.selectOne(new LambdaQueryWrapper<UserEntity>()
                 .and(q -> q.eq(UserEntity::getUsername, login).or().eq(UserEntity::getEmail, login.toLowerCase())));
-        if (user == null || !"ACTIVE".equals(user.getStatus())) {
+        if (user == null || !"ACTIVE".equals(user.getStatus()) || user.getEmailVerifiedAt() == null) {
             throw new BusinessException(ErrorCode.AUTH_INVALID_CREDENTIALS, "账号或密码错误");
         }
         Instant now = Instant.now();
@@ -104,7 +145,7 @@ public class AuthService {
             throw new BusinessException(ErrorCode.AUTH_TOKEN_EXPIRED, "刷新令牌无效或已过期");
         }
         UserEntity user = userMapper.selectById(old.getUserId());
-        if (user == null || !"ACTIVE".equals(user.getStatus())) {
+        if (user == null || !"ACTIVE".equals(user.getStatus()) || user.getEmailVerifiedAt() == null) {
             throw new BusinessException(ErrorCode.AUTH_UNAUTHENTICATED, "账号不可用");
         }
         old.setRevokedAt(Instant.now());
@@ -138,7 +179,16 @@ public class AuthService {
         Set<String> roles = userMapper.findRoleCodes(user.getId());
         Set<String> permissions = userMapper.findPermissionCodes(user.getId());
         return new UserView(user.getPublicId(), user.getUsername(), user.getEmail(), user.getTimezone(),
+                user.getEmailVerifiedAt() != null,
                 roles, permissions, user.getVersion() == null ? 0 : user.getVersion());
+    }
+
+    private UserEntity findByEmail(String email) {
+        return userMapper.selectOne(new LambdaQueryWrapper<UserEntity>().eq(UserEntity::getEmail, email));
+    }
+
+    private String normalizeEmail(String email) {
+        return email.trim().toLowerCase(java.util.Locale.ROOT);
     }
 
     private TokenPair issuePair(UserEntity user, String deviceId) {

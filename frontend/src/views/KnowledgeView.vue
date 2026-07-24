@@ -35,7 +35,7 @@ function statusType(status:string){return status==='INDEXED'?'success':status?.i
     <div class="grid kb-grid">
       <aside class="panel spaces"><h3>知识空间</h3><button v-for="space in spaces" :key="space.publicId" :class="{active:selected?.publicId===space.publicId}" @click="choose(space)"><span>▤</span><div><b>{{space.name}}</b><small>{{space.status||'ACTIVE'}}</small></div></button><div v-if="!spaces.length" class="empty">还没有知识空间</div></aside>
       <section class="panel">
-        <div class="panel-title"><div><h3>{{selected?.name||'文档'}}</h3><p>支持 PDF、Word、Markdown、TXT，单文件大小受后端配置限制。</p></div><el-upload v-if="selected" :show-file-list="false" :auto-upload="false" :on-change="upload" accept=".pdf,.doc,.docx,.md,.txt"><el-button :loading="uploading">上传文档</el-button></el-upload></div>
+        <div class="panel-title"><div><h3>{{selected?.name||'文档'}}</h3><p>支持 PDF、DOCX、Markdown、TXT，单文件大小受后端配置限制；视频和音频不进入学习闭环。</p></div><el-upload v-if="selected" :show-file-list="false" :auto-upload="false" :on-change="upload" accept=".pdf,.docx,.md,.txt"><el-button :loading="uploading">上传文档</el-button></el-upload></div>
         <el-table :data="documents">
           <el-table-column label="文档" min-width="250"><template #default="{row}"><b>{{row.displayName}}</b><div class="muted file-meta">版本 {{row.activeVersionNo}} · {{row.visibility}}</div></template></el-table-column>
           <el-table-column label="处理状态" width="140"><template #default="{row}"><el-tag :type="statusType(row.status)" effect="plain">{{row.status}}</el-tag></template></el-table-column>

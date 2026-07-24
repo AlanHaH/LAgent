@@ -18,17 +18,24 @@ public class AuditService {
 
     public void record(String action, String resourceType, String resourceId,
                        String before, String after, String result) {
+        recordAs(SecurityUtils.currentUserIdOrSystem(), RequestIdFilter.currentRequestId(), clientIp(),
+                action, resourceType, resourceId, before, after, result);
+    }
+
+    /** Records work completed after the HTTP request thread has returned (for example SSE generation). */
+    public void recordAs(long operatorId, String requestId, String ip, String action, String resourceType,
+                         String resourceId, String before, String after, String result) {
         AuditLogEntity log = new AuditLogEntity();
-        log.setRequestId(RequestIdFilter.currentRequestId());
-        log.setOperatorId(SecurityUtils.currentUserIdOrSystem());
-        log.setOperatorType(log.getOperatorId() == 0 ? "SYSTEM" : "USER");
+        log.setRequestId(requestId == null ? "request-unavailable" : requestId);
+        log.setOperatorId(operatorId);
+        log.setOperatorType(operatorId == 0 ? "SYSTEM" : "USER");
         log.setAction(action);
         log.setResourceType(resourceType);
         log.setResourceId(resourceId);
         log.setBeforeSummary(truncate(before));
         log.setAfterSummary(truncate(after));
         log.setResult(result);
-        log.setIp(clientIp());
+        log.setIp(ip);
         log.setCreatedAt(Instant.now());
         mapper.insert(log);
     }
@@ -42,4 +49,3 @@ public class AuditService {
         return value == null ? null : value.substring(0, Math.min(2000, value.length()));
     }
 }
-

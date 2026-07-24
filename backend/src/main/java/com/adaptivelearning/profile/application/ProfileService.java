@@ -9,6 +9,7 @@ import com.adaptivelearning.support.application.AuditService;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
 import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.JavaType;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -17,11 +18,15 @@ import org.springframework.transaction.annotation.Transactional;
 
 import java.math.BigDecimal;
 import java.time.*;
+import java.time.temporal.ChronoUnit;
 import java.util.*;
 
 @Service
 @RequiredArgsConstructor
 public class ProfileService {
+    private static final Set<String> DOCUMENT_CONTENT_MODES = Set.of("TEXT", "PRACTICE");
+    private static final List<String> DEFAULT_CONTENT_MODES = List.of("TEXT", "PRACTICE");
+
     private final UserProfileMapper profileMapper;
     private final ProfileDirectionMapper directionMapper;
     private final LearningPreferenceMapper preferenceMapper;
@@ -35,11 +40,13 @@ public class ProfileService {
     private final AuditService audit;
 
     public record DirectionInput(Long directionId, String customDirection, String currentStage, boolean primary) {}
-    public record ProfileInput(String timezone, int weekStart, int planPeriodDays, String backgroundText,
+    public record ProfileInput(String timezone, int weekStart, Integer planPeriodDays,
+                               LocalDate planStartDate, LocalDate planEndDate, String backgroundText,
                                List<DirectionInput> directions, Integer version) {}
     public record DirectionView(Long directionId, String name, String customDirection, String sourceType,
                                 String currentStage, boolean primary) {}
-    public record ProfileView(String timezone, int weekStart, int planPeriodDays, String backgroundText,
+    public record ProfileView(String timezone, int weekStart, int planPeriodDays,
+                              LocalDate planStartDate, LocalDate planEndDate, String backgroundText,
                               String status, int currentVersionNo, int version, List<DirectionView> directions,
                               PreferenceView preference) {}
     public record PreferenceInput(List<String> contentModes, String guidanceStyle, String taskGranularity,
@@ -58,15 +65,16 @@ public class ProfileService {
                 d.getDirectionId() == null ? null : directionName(d.getDirectionId()), d.getCustomDirection(),
                 d.getSourceType(), d.getCurrentStage(), Boolean.TRUE.equals(d.getIsPrimary()))).toList();
         return new ProfileView(profile.getTimezone(), profile.getWeekStart(), profile.getPlanPeriodDays(),
-                profile.getBackgroundText(), profile.getProfileStatus(), profile.getCurrentVersionNo(),
+                profile.getPlanStartDate(), profile.getPlanEndDate(), profile.getBackgroundText(),
+                profile.getProfileStatus(), profile.getCurrentVersionNo(),
                 profile.getVersion(), views, preferenceView());
     }
 
     @Transactional
     public ProfileView save(ProfileInput input) {
-        validateProfile(input);
         long userId = SecurityUtils.currentUserId();
         UserProfileEntity profile = findProfile();
+        DateRange planDates = validateProfile(input, profile);
         boolean create = profile == null;
         if (create) {
             profile = new UserProfileEntity();
@@ -78,8 +86,11 @@ public class ProfileService {
         }
         profile.setTimezone(input.timezone());
         profile.setWeekStart(input.weekStart());
-        profile.setPlanPeriodDays(input.planPeriodDays());
+        profile.setPlanStartDate(planDates.start());
+        profile.setPlanEndDate(planDates.end());
+        profile.setPlanPeriodDays(planDates.days());
         profile.setBackgroundText(input.backgroundText());
+        profile.setProfileStatus("DRAFT");
         if (create) profileMapper.insert(profile); else if (profileMapper.updateById(profile) != 1) conflict();
         directionMapper.delete(new LambdaQueryWrapper<ProfileDirectionEntity>()
                 .eq(ProfileDirectionEntity::getProfileId, profile.getId()));
@@ -101,11 +112,10 @@ public class ProfileService {
 
     @Transactional
     public PreferenceView savePreference(PreferenceInput input) {
-        Set<String> modes = Set.of("TEXT", "VIDEO", "AUDIO", "PRACTICE", "PROJECT");
-        if (input.contentModes() == null || input.contentModes().isEmpty() || !modes.containsAll(input.contentModes())) {
-            throw new BusinessException(ErrorCode.COMMON_VALIDATION_ERROR, "至少选择一种有效内容形式");
-        }
-        if (input.focusMinutes() < 10 || input.focusMinutes() > 180 || input.capacityRatio().compareTo(new BigDecimal("0.60")) < 0
+        List<String> contentModes = validateDocumentContentModes(input.contentModes());
+        if (!Set.of("SOCRATIC", "DIRECT").contains(input.guidanceStyle())
+                || !Set.of("SMALL", "MEDIUM", "LARGE").contains(input.taskGranularity())
+                || input.focusMinutes() < 10 || input.focusMinutes() > 180 || input.capacityRatio().compareTo(new BigDecimal("0.60")) < 0
                 || input.capacityRatio().compareTo(new BigDecimal("0.95")) > 0
                 || input.difficultyMin() < 1 || input.difficultyMax() > 5 || input.difficultyMin() > input.difficultyMax()) {
             throw new BusinessException(ErrorCode.COMMON_VALIDATION_ERROR, "学习偏好参数超出允许范围");
@@ -116,7 +126,7 @@ public class ProfileService {
         boolean create = entity == null;
         if (create) { entity = new LearningPreferenceEntity(); entity.setUserId(userId); }
         else if (input.version() == null || !input.version().equals(entity.getVersion())) conflict();
-        entity.setContentModesJson(json(input.contentModes()));
+        entity.setContentModesJson(json(contentModes));
         entity.setGuidanceStyle(input.guidanceStyle());
         entity.setTaskGranularity(input.taskGranularity());
         entity.setFocusMinutes(input.focusMinutes());
@@ -125,6 +135,7 @@ public class ProfileService {
         entity.setDifficultyMax(input.difficultyMax());
         entity.setReminderJson(json(input.reminders() == null ? Map.of() : input.reminders()));
         if (create) preferenceMapper.insert(entity); else if (preferenceMapper.updateById(entity) != 1) conflict();
+        markProfileDraft(userId);
         return preferenceView();
     }
 
@@ -140,6 +151,7 @@ public class ProfileService {
             entity.setEndTime(slot.end()); entity.setAvailableMinutes(slot.minutes()); entity.setEnergyLevel(slot.energyLevel());
             ruleMapper.insert(entity);
         }
+        markProfileDraft(userId);
         return slots;
     }
 
@@ -175,6 +187,7 @@ public class ProfileService {
         if (entity == null) { entity = new AvailabilityExceptionEntity(); entity.setUserId(userId); entity.setLocalDate(date); }
         entity.setAvailableMinutes(minutes); entity.setReason(reason);
         if (entity.getId() == null) exceptionMapper.insert(entity); else exceptionMapper.updateById(entity);
+        markProfileDraft(userId);
     }
 
     public SelfAssessmentEntity addSelfAssessment(long knowledgePointId, int level, LocalDate lastStudiedAt, String note) {
@@ -198,8 +211,30 @@ public class ProfileService {
         List<SelfAssessmentEntity> assessments = selfAssessmentMapper.selectList(new LambdaQueryWrapper<SelfAssessmentEntity>()
                 .eq(SelfAssessmentEntity::getUserId, profile.getUserId()));
         BigDecimal confidence = assessments.isEmpty() ? new BigDecimal("0.10") : new BigDecimal("0.20");
+        List<ProfileDirectionEntity> generatedDirections = directionMapper.selectList(
+                new LambdaQueryWrapper<ProfileDirectionEntity>()
+                        .eq(ProfileDirectionEntity::getProfileId, profile.getId())
+                        .eq(ProfileDirectionEntity::getStatus, "ACTIVE")
+                        .orderByDesc(ProfileDirectionEntity::getIsPrimary));
+        PreferenceView generatedPreference = preferenceView();
+        int weeklyAvailableMinutes = ruleMapper.selectList(new LambdaQueryWrapper<AvailabilityRuleEntity>()
+                        .eq(AvailabilityRuleEntity::getUserId, profile.getUserId())).stream()
+                .mapToInt(AvailabilityRuleEntity::getAvailableMinutes).sum();
         Map<String, Object> snapshot = new LinkedHashMap<>();
         snapshot.put("timezone", profile.getTimezone()); snapshot.put("generatedAt", Instant.now());
+        snapshot.put("planStartDate", profile.getPlanStartDate()); snapshot.put("planEndDate", profile.getPlanEndDate());
+        snapshot.put("backgroundText", profile.getBackgroundText());
+        snapshot.put("directions", generatedDirections.stream().map(direction -> {
+            Map<String, Object> item = new LinkedHashMap<>();
+            item.put("directionId", direction.getDirectionId());
+            item.put("name", direction.getDirectionId() == null ? direction.getCustomDirection()
+                    : directionName(direction.getDirectionId()));
+            item.put("currentStage", direction.getCurrentStage());
+            item.put("primary", Boolean.TRUE.equals(direction.getIsPrimary()));
+            return item;
+        }).toList());
+        snapshot.put("preference", generatedPreference);
+        snapshot.put("weeklyAvailableMinutes", weeklyAvailableMinutes);
         snapshot.put("source", Map.of("profileVersion", profile.getVersion(), "selfAssessmentCount", assessments.size()));
         snapshot.put("confidence", confidence); snapshot.put("recommendedDifficulty", assessments.isEmpty() ? 1 : 2);
         snapshot.put("dailyRecommendedTasks", 2);
@@ -234,33 +269,99 @@ public class ProfileService {
                 .eq(UserProfileEntity::getUserId, SecurityUtils.currentUserId()));
     }
 
+    private void markProfileDraft(long userId) {
+        profileMapper.update(null, new LambdaUpdateWrapper<UserProfileEntity>()
+                .eq(UserProfileEntity::getUserId, userId)
+                .set(UserProfileEntity::getProfileStatus, "DRAFT"));
+    }
+
     private PreferenceView preferenceView() {
         LearningPreferenceEntity p = preferenceMapper.selectOne(new LambdaQueryWrapper<LearningPreferenceEntity>()
                 .eq(LearningPreferenceEntity::getUserId, SecurityUtils.currentUserId()));
         if (p == null) return null;
         try {
-            return new PreferenceView(objectMapper.readValue(p.getContentModesJson(), objectMapper.getTypeFactory().constructCollectionType(List.class, String.class)),
+            List<String> contentModes = normalizeStoredContentModes(readJson(p.getContentModesJson(),
+                    objectMapper.getTypeFactory().constructCollectionType(List.class, String.class)));
+            return new PreferenceView(contentModes,
                     p.getGuidanceStyle(), p.getTaskGranularity(), p.getFocusMinutes(), p.getCapacityRatio(),
-                    p.getDifficultyMin(), p.getDifficultyMax(), objectMapper.readValue(p.getReminderJson(),
+                    p.getDifficultyMin(), p.getDifficultyMax(), readJson(p.getReminderJson(),
                     objectMapper.getTypeFactory().constructMapType(Map.class, String.class, Boolean.class)), p.getVersion());
         } catch (JsonProcessingException e) { throw new IllegalStateException(e); }
     }
 
-    private void validateProfile(ProfileInput input) {
+    private List<String> validateDocumentContentModes(List<String> contentModes) {
+        if (contentModes == null || contentModes.isEmpty()) {
+            throw new BusinessException(ErrorCode.COMMON_VALIDATION_ERROR, "至少选择一种文档型学习方式");
+        }
+        if (!DOCUMENT_CONTENT_MODES.containsAll(contentModes)) {
+            throw new BusinessException(ErrorCode.COMMON_VALIDATION_ERROR, "当前只支持文字资料和练习两类可量化学习方式");
+        }
+        return List.copyOf(new LinkedHashSet<>(contentModes));
+    }
+
+    private List<String> normalizeStoredContentModes(List<String> contentModes) {
+        if (contentModes == null) return DEFAULT_CONTENT_MODES;
+        List<String> normalized = contentModes.stream()
+                .filter(DOCUMENT_CONTENT_MODES::contains)
+                .distinct()
+                .toList();
+        return normalized.isEmpty() ? DEFAULT_CONTENT_MODES : normalized;
+    }
+
+    private <T> T readJson(String value, JavaType type) throws JsonProcessingException {
+        var tree = objectMapper.readTree(value);
+        return tree.isTextual() ? objectMapper.readValue(tree.asText(), type) : objectMapper.convertValue(tree, type);
+    }
+
+    private DateRange validateProfile(ProfileInput input, UserProfileEntity existing) {
         try { ZoneId.of(input.timezone()); } catch (Exception e) { throw new BusinessException(ErrorCode.COMMON_VALIDATION_ERROR, "无效的 IANA 时区"); }
-        if (input.weekStart() < 1 || input.weekStart() > 7 || input.planPeriodDays() < 1 || input.planPeriodDays() > 365
+        if (input.weekStart() < 1 || input.weekStart() > 7
                 || input.backgroundText() != null && input.backgroundText().length() > 2000
                 || input.directions() == null || input.directions().isEmpty()
                 || input.directions().stream().filter(DirectionInput::primary).count() != 1) {
             throw new BusinessException(ErrorCode.COMMON_VALIDATION_ERROR, "画像字段不完整或主方向数量不为 1");
         }
         for (DirectionInput d : input.directions()) {
+            if (!Set.of("BEGINNER", "INTERMEDIATE", "ADVANCED").contains(d.currentStage())) {
+                throw new BusinessException(ErrorCode.COMMON_VALIDATION_ERROR, "当前阶段不在允许范围内");
+            }
             if (d.directionId() == null && (d.customDirection() == null || d.customDirection().isBlank())) {
                 throw new BusinessException(ErrorCode.COMMON_VALIDATION_ERROR, "自定义方向名称不能为空");
             }
+            if (d.customDirection() != null && d.customDirection().length() > 120) {
+                throw new BusinessException(ErrorCode.COMMON_VALIDATION_ERROR, "自定义方向名称不能超过 120 字");
+            }
             if (d.directionId() != null) directionName(d.directionId());
         }
+        LocalDate start = input.planStartDate();
+        LocalDate end = input.planEndDate();
+        if ((start == null) != (end == null)) {
+            throw new BusinessException(ErrorCode.COMMON_VALIDATION_ERROR, "计划开始日期和结束日期必须同时填写");
+        }
+        if (start == null) {
+            if (input.planPeriodDays() == null || input.planPeriodDays() < 1 || input.planPeriodDays() > 365) {
+                throw new BusinessException(ErrorCode.COMMON_VALIDATION_ERROR, "计划周期必须为 1～365 天");
+            }
+            if (existing != null && existing.getPlanStartDate() != null && existing.getPlanEndDate() != null
+                    && Objects.equals(existing.getPlanPeriodDays(), input.planPeriodDays())) {
+                start = existing.getPlanStartDate();
+                end = existing.getPlanEndDate();
+            } else {
+                start = LocalDate.now(ZoneId.of(input.timezone()));
+                end = start.plusDays(input.planPeriodDays() - 1L);
+            }
+        }
+        long days = ChronoUnit.DAYS.between(start, end) + 1;
+        if (days < 1 || days > 365) {
+            throw new BusinessException(ErrorCode.COMMON_VALIDATION_ERROR, "计划起止日期必须组成 1～365 天的周期");
+        }
+        if (input.planPeriodDays() != null && input.planStartDate() != null && input.planPeriodDays() != days) {
+            throw new BusinessException(ErrorCode.COMMON_VALIDATION_ERROR, "计划周期天数与起止日期不一致");
+        }
+        return new DateRange(start, end, Math.toIntExact(days));
     }
+
+    private record DateRange(LocalDate start, LocalDate end, int days) {}
 
     private String directionName(long id) {
         List<String> names = jdbc.query("SELECT name FROM learning_direction WHERE id=? AND status='ACTIVE'",
@@ -275,4 +376,3 @@ public class ProfileService {
 
     private void conflict() { throw new BusinessException(ErrorCode.RESOURCE_VERSION_CONFLICT, "资源版本冲突，请刷新后重试"); }
 }
-

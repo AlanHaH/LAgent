@@ -1,5 +1,51 @@
-package com.adaptivelearning.evaluation.application;import java.time.*;import java.util.*;
-public final class MasteryPolicy {private MasteryPolicy(){}
- public enum Component{Q,R,P,S}public record Evidence(Component component,double score,double baseWeight,Instant occurredAt,boolean objective){}public record Result(double score,double confidence,String level,int evidenceCount,Set<Component>components){}
- public static Result calculate(List<Evidence>evidence,Instant now){if(evidence==null||evidence.isEmpty())throw new IllegalArgumentException("evidence required");Map<Component,Double>scores=new EnumMap<>(Component.class);for(Component c:Component.values()){List<Evidence>list=evidence.stream().filter(e->e.component()==c).toList();if(list.isEmpty())continue;double weighted=0,weights=0;for(Evidence e:list){double freshness=Math.pow(.5,Duration.between(e.occurredAt(),now).toDays()/30.0);double w=e.baseWeight()*freshness;weighted+=e.score()*w;weights+=w;}scores.put(c,weighted/weights);}Map<Component,Double>base=Map.of(Component.Q,.55,Component.R,.20,Component.P,.15,Component.S,.10);double sum=0,denom=0;for(var x:scores.entrySet()){sum+=x.getValue()*base.get(x.getKey());denom+=base.get(x.getKey());}double mastery=Math.round(sum/denom*10)/10.0;long objective=evidence.stream().filter(Evidence::objective).count();long recent=evidence.stream().filter(e->e.occurredAt().isAfter(now.minus(Duration.ofDays(30)))).count();double quantity=Math.min(1,objective/10.0),diversity=Math.min(1,scores.size()/3.0),recency=Math.min(1,recent/5.0);double confidence=.5*quantity+.3*diversity+.2*recency;if(scores.keySet().equals(Set.of(Component.S)))confidence=Math.min(confidence,.2);confidence=Math.round(confidence*1000)/1000.0;String level=mastery<40?"NOT_MASTERED":mastery<60?"WEAK":mastery<80?"BASIC":"PROFICIENT";if(confidence<.4)level="TENTATIVE_"+level;return new Result(mastery,confidence,level,evidence.size(),Set.copyOf(scores.keySet()));}
+package com.adaptivelearning.evaluation.application;
+
+import java.time.*;
+import java.util.*;
+
+public final class MasteryPolicy {
+    private MasteryPolicy() {
+    }
+
+    public enum Component {Q, R, P, S}
+
+    public record Evidence(Component component, double score, double baseWeight, Instant occurredAt,
+                           boolean objective) {
+    }
+
+    public record Result(double score, double confidence, String level, int evidenceCount, Set<Component> components) {
+    }
+
+    public static Result calculate(List<Evidence> evidence, Instant now) {
+        if (evidence == null || evidence.isEmpty()) throw new IllegalArgumentException("evidence required");
+        Map<Component, Double> scores = new EnumMap<>(Component.class);
+        for (Component c : Component.values()) {
+            List<Evidence> list = evidence.stream().filter(e -> e.component() == c).toList();
+            if (list.isEmpty()) continue;
+            double weighted = 0, weights = 0;
+            for (Evidence e : list) {
+                double freshness = Math.pow(.5, Duration.between(e.occurredAt(), now).toDays() / 30.0);
+                double w = e.baseWeight() * freshness;
+                weighted += e.score() * w;
+                weights += w;
+            }
+            scores.put(c, weighted / weights);
+        }
+        Map<Component, Double> base = Map.of(Component.Q, .55, Component.R, .20, Component.P, .15, Component.S, .10);
+        double sum = 0, denom = 0;
+        for (var x : scores.entrySet()) {
+            sum += x.getValue() * base.get(x.getKey());
+            denom += base.get(x.getKey());
+        }
+        double mastery = Math.round(sum / denom * 10) / 10.0;
+        long objective = evidence.stream().filter(Evidence::objective).count();
+        long recent = evidence.stream().filter(e -> e.occurredAt().isAfter(now.minus(Duration.ofDays(30)))).count();
+        double quantity = Math.min(1, objective / 10.0), diversity = Math.min(1, scores.size() / 3.0), recency = Math.min(1, recent / 5.0);
+        double confidence = .5 * quantity + .3 * diversity + .2 * recency;
+        if (scores.keySet().equals(Set.of(Component.S))) confidence = Math.min(confidence, .2);
+        confidence = Math.round(confidence * 1000) / 1000.0;
+        String level = mastery < 40 ? "NOT_MASTERED" : mastery < 60 ? "WEAK" : mastery < 80 ? "BASIC" : "PROFICIENT";
+        if (confidence < .4) level = "TENTATIVE_" + level;
+        return new Result(mastery, confidence, level, evidence.size(), Set.copyOf(scores.keySet()));
+    }
 }

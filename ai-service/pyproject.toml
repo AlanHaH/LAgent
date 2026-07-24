@@ -1,0 +1,52 @@
+[build-system]
+requires = ["hatchling>=1.26"]
+build-backend = "hatchling.build"
+
+[project]
+name = "adaptive-learning-ai-service"
+version = "1.0.0"
+description = "Python AI, embedding and RAG service for Zhixu adaptive learning"
+requires-python = ">=3.11,<3.14"
+dependencies = [
+  "fastapi>=0.116,<1",
+  "uvicorn[standard]>=0.35,<1",
+  "httpx>=0.28,<1",
+  "pydantic>=2.11,<3",
+  "pydantic-settings>=2.10,<3",
+  "qdrant-client>=1.15,<2",
+  "tenacity>=9.1,<10",
+  "tzdata>=2025.2",
+]
+
+[project.optional-dependencies]
+embeddings = ["sentence-transformers>=5,<6"]
+dev = [
+  "pytest>=8.4,<9",
+  "pytest-asyncio>=1,<2",
+  "ruff>=0.12,<1",
+  "mypy>=1.17,<2",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["app"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+
+[tool.ruff]
+line-length = 110
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "ASYNC"]
+
+[tool.mypy]
+python_version = "3.13"
+strict = true
+plugins = ["pydantic.mypy"]
+
+[[tool.mypy.overrides]]
+module = ["sentence_transformers", "sentence_transformers.*"]
+ignore_missing_imports = true
+follow_imports = "skip"

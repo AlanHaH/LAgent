@@ -6,9 +6,11 @@ import com.adaptivelearning.shared.exception.ErrorCode;
 import java.util.*;
 
 public final class DependencyGraphPolicy {
-    private DependencyGraphPolicy() {}
+    private DependencyGraphPolicy() {
+    }
 
-    public record Edge(long predecessor, long successor) {}
+    public record Edge(long predecessor, long successor) {
+    }
 
     public static void requireAcyclic(Collection<Edge> edges) {
         Map<Long, List<Long>> graph = new HashMap<>();
@@ -16,7 +18,8 @@ public final class DependencyGraphPolicy {
         for (Edge edge : edges) {
             if (edge.predecessor() == edge.successor()) cycle(List.of(edge.predecessor(), edge.successor()));
             graph.computeIfAbsent(edge.predecessor(), ignored -> new ArrayList<>()).add(edge.successor());
-            nodes.add(edge.predecessor()); nodes.add(edge.successor());
+            nodes.add(edge.predecessor());
+            nodes.add(edge.successor());
         }
         Set<Long> visiting = new HashSet<>();
         Set<Long> visited = new HashSet<>();
@@ -34,12 +37,14 @@ public final class DependencyGraphPolicy {
         }
         path.addLast(node);
         for (Long next : graph.getOrDefault(node, List.of())) dfs(next, graph, visiting, visited, path);
-        path.removeLast(); visiting.remove(node); visited.add(node);
+        path.removeLast();
+        visiting.remove(node);
+        visited.add(node);
     }
 
     private static void cycle(List<Long> path) {
         throw new BusinessException(ErrorCode.DEPENDENCY_CYCLE_DETECTED, "依赖关系形成环",
-                Map.of("path", path));
+            Map.of("path", path));
     }
 }
 

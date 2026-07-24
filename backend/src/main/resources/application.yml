@@ -43,12 +43,54 @@ mybatis-plus:
       logic-not-delete-value: 'null'
 
 app:
+  ai-service:
+    enabled: ${AI_SERVICE_ENABLED:false}
+    base-url: ${AI_SERVICE_BASE_URL:http://127.0.0.1:8090}
+    internal-token: ${AI_INTERNAL_TOKEN:local-ai-internal-token-change-me-32}
+    timeout: ${AI_SERVICE_TIMEOUT:PT65S}
+    model-name: ${MODEL_NAME:}
+  ai:
+    enabled: ${MODEL_ENABLED:true}
+    base-url: ${MODEL_BASE_URL:}
+    api-key: ${MODEL_API_KEY:}
+    model: ${MODEL_NAME:}
+    timeout: ${MODEL_TIMEOUT:PT45S}
+    max-output-tokens: ${MODEL_MAX_OUTPUT_TOKENS:1200}
+    thinking: ${MODEL_THINKING:disabled}
+  redis:
+    enabled: ${REDIS_ENABLED:true}
+  rate-limit:
+    login:
+      max-requests: ${LOGIN_RATE_LIMIT:20}
+      window: ${LOGIN_RATE_WINDOW:PT1M}
+    verification:
+      max-requests: ${VERIFICATION_RATE_LIMIT:5}
+      window: ${VERIFICATION_RATE_WINDOW:PT10M}
+    model:
+      max-requests: ${MODEL_RATE_LIMIT:20}
+      window: ${MODEL_RATE_WINDOW:PT1M}
+  mail:
+    host: ${MAIL_HOST:}
+    port: ${MAIL_PORT:587}
+    username: ${MAIL_USERNAME:}
+    password: ${MAIL_PASSWORD:}
+    from: ${MAIL_FROM:${MAIL_USERNAME:}}
+    auth-enabled: ${MAIL_AUTH_ENABLED:true}
+    starttls-enabled: ${MAIL_STARTTLS_ENABLED:true}
+    ssl-enabled: ${MAIL_SSL_ENABLED:false}
+    connection-timeout: ${MAIL_CONNECTION_TIMEOUT:PT10S}
+    write-timeout: ${MAIL_WRITE_TIMEOUT:PT10S}
+    read-timeout: ${MAIL_READ_TIMEOUT:PT10S}
   security:
     jwt-secret: ${JWT_SECRET:local-development-secret-change-before-production-123456}
     access-token-minutes: ${ACCESS_TOKEN_MINUTES:15}
     refresh-token-days: ${REFRESH_TOKEN_DAYS:30}
     login-max-failures: 5
     login-lock-minutes: 15
+    verification-code-minutes: ${VERIFICATION_CODE_MINUTES:10}
+    verification-code-resend-seconds: ${VERIFICATION_CODE_RESEND_SECONDS:60}
+    verification-code-max-attempts: ${VERIFICATION_CODE_MAX_ATTEMPTS:5}
+    verification-code-pepper: ${VERIFICATION_CODE_PEPPER:${JWT_SECRET:local-development-secret-change-before-production-123456}}
   planning:
     capacity-ratio: 0.85
     confirmation-minutes: 30
@@ -61,8 +103,9 @@ app:
     chunk-target-chars: 600
     chunk-max-chars: 1600
     top-k: 5
+    python-fallback-enabled: ${AI_SERVICE_RAG_FALLBACK:true}
   cors:
-    allowed-origins: ${CORS_ALLOWED_ORIGINS:http://localhost:5173}
+    allowed-origins: ${CORS_ALLOWED_ORIGINS:http://localhost:5300,http://127.0.0.1:5300}
 
 management:
   endpoints:

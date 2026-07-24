@@ -7,9 +7,20 @@ cd backend
 mvn test
 ```
 
-当前测试集包含 19 个断言，覆盖策略规则和一条真实 Spring MVC/H2 认证集成链路。最后一次验证结果为 `19 tests, 0 failures, 0 errors`。
+Java 测试集包含 40 个测试，覆盖策略规则、目标创建规则、画像方向异常输出防护、推荐目标方向映射、AI 引用与降级、Java→Python内部令牌/JSON/SSE 契约、Redis限流降级、验证码一次性消费/错误次数，以及 Spring MVC/H2 画像和认证集成链路。2026-07-24 使用 JDK 21 的验证结果为 `40 tests, 0 failures, 0 errors`。
 
-基线迁移还在隔离的 MySQL 8.0.26 实例上完成了真实执行：创建 80 张业务表，写入 4 个方向、8 个知识点和 6 道公共题。随后可执行 JAR 在另一空库上由 Flyway 自行迁移，得到 80 张业务表、1 张 Flyway 历史表和 1 条成功迁移记录；在 Redis 故意不可用时，注册与普通用户目录读取仍成功。
+Python AI 服务测试与静态检查：
+
+```powershell
+cd ai-service
+.\.venv\Scripts\python.exe -m pytest -q
+.\.venv\Scripts\python.exe -m ruff check app tests
+.\.venv\Scripts\python.exe -m mypy app
+```
+
+Python 当前共有 11 个测试，使用确定性 Hash Embedding、Qdrant Memory 和模拟模型，不访问真实 DeepSeek，覆盖模型同步/流式解析、画像可见文本投影、目标推荐结构/画像方向约束/周期与容量收口、内部鉴权、索引/搜索/双条件删除、私有资料过滤、引用白名单和降级。2026-07-23 验证结果为 `11 passed`。
+
+基线迁移曾在隔离的 MySQL 8.0.26 实例上完成真实执行：创建 80 张业务表，写入 4 个方向、8 个知识点和 6 道公共题。当前升级还包含 V2 邮箱验证、V3 画像访谈/自定义周期、V4 表注释、V5 目标画像版本关联，以及 V6 经济学目录、知识点和公共诊断题迁移；部署验收时应确认 `sys_user.email_verified_at` 已回填，画像访谈表已创建，`learning_goal` 已增加推荐来源字段，经济学方向可被选择，且 Flyway 历史包含 V1～V6。Redis 故意不可用时，普通已登录业务仍可按各模块降级策略运行，但注册、找回密码和邮箱变更应返回验证码服务暂不可用。
 
 ```bash
 cd frontend
@@ -17,13 +28,26 @@ npm ci
 npm run build
 ```
 
-`npm run build` 同时运行严格 TypeScript 检查和 Vite 生产构建。最后一次验证成功转换 2323 个模块。
+`npm run build` 同时运行严格 TypeScript 检查和 Vite 生产构建。2026-07-24 的最后一次验证成功转换 2328 个模块。若 Windows PowerShell 因执行策略拒绝加载 `npm.ps1`，可使用 `npm.cmd run build`，两者执行同一个 npm 脚本。
+
+## 前端宣传页验收
+
+2026-07-22 已完成生产构建和浏览器关键交互验收。回归时至少检查：
+
+1. 未登录直接访问 `/` 能看到宣传首页，不被路由守卫送往登录页；
+2. “画像、规划、执行、知识、复盘”五个页签切换后，标题、说明和产品界面预览同步变化；
+3. 在规划体验区切换方向、每周时间和指导方式后，生成结果包含对应标题、任务和 Agent 建议；
+4. 宣传页预览不发起正式画像或计划写入，刷新后无需恢复该临时结果；
+5. 未登录点击主行动按钮进入 `/login?mode=register`，表单直接显示注册模式；登录按钮进入 `/login`；
+6. 已登录时宣传页主按钮显示“进入工作台”，访问 `/dashboard` 仍由原工作台外壳承载；
+7. 未登录直接访问 `/dashboard` 会保留目标地址并跳转登录，登录后返回原页面；
+8. 在宽度 1120、900 和 640 像素附近检查响应式断点，并在系统启用“减少动态效果”时确认动画降级。
 
 ## Docker 端到端验收
 
 1. 使用非示例密钥创建 `.env`，执行 `docker compose up --build -d`。
-2. `docker compose ps` 中 MySQL、Redis、backend、frontend 均应为 healthy/running。
-3. 注册普通用户，完成画像、可用时间、目标激活、计划生成、确认发布。
+2. `docker compose ps` 中 MySQL、Redis、Qdrant、ai-service、backend、frontend 均应为 healthy/running；`ai-service /health/ready` 应报告模型、Embedding和 Qdrant 状态，Hash 回退时必须显示 `degraded=true`。
+3. 配置 SMTP，完成邮箱验证码注册；再验证找回密码和更换邮箱，随后完成画像、可用时间、目标激活、计划生成、确认发布。
 4. 检查今日任务，启动并停止学习计时，保存两版笔记。
 5. 上传一份 PDF 或 Markdown，等待 READY 后提问；确认回答含引用，超出材料的问题明确拒答。
 6. 创建诊断、逐题暂存、交卷两次；第二次不能重复评分或重复写幂等结果。
@@ -33,6 +57,7 @@ npm run build
 ## 关键边界清单
 
 - 同一用户重复注册、连续错误登录与锁定时间。
+- 验证码过期、重复消费、连续输错、重发冷却，密码重置后旧密码与刷新令牌失效。
 - 跨午夜时段拆分、重叠拒绝、例外日容量和 85% 上限。
 - 已暂停目标不得规划，已完成任务不得再次启动，完成反转必须确认。
 - 旧画像/目标版本导致计划上下文过期，确认令牌过期或提案哈希变化时拒绝发布。
