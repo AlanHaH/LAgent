@@ -5,6 +5,9 @@ import com.adaptivelearning.evaluation.infrastructure.EvaluationMappers.ReportMa
 import com.adaptivelearning.execution.application.StudySessionService;
 import com.adaptivelearning.execution.domain.StudySessionEntity;
 import com.adaptivelearning.execution.infrastructure.ExecutionMappers.SessionMapper;
+import com.adaptivelearning.shared.ai.AiModelClient;
+import com.adaptivelearning.shared.ai.AiModelException;
+import com.adaptivelearning.shared.ai.PythonAiServiceClient;
 import com.adaptivelearning.shared.exception.BusinessException;
 import com.adaptivelearning.shared.exception.ErrorCode;
 import com.adaptivelearning.shared.security.SecurityUtils;
@@ -26,6 +29,7 @@ public class AnalyticsService {
     private final SessionMapper sessionMapper;
     private final ReportMapper reportMapper;
     private final ObjectMapper json;
+    private final PythonAiServiceClient pythonAi;
 
     public record Metric(Object value, BigDecimal numerator, BigDecimal denominator, LocalDate periodStart,
                          LocalDate periodEnd, String timezone, Instant refreshedAt, String metricVersion) {
@@ -76,14 +80,40 @@ public class AnalyticsService {
         report.setTimezone(r.timezone);
         report.setRevisionNo(revision == null ? 1 : revision);
         report.setMetricSnapshotJson(toJson(o));
-        Metric completion = o.metrics().get("taskCompletionRate");
-        Metric time = o.metrics().get("effectiveStudySeconds");
-        String completionText = completion.value() == null ? "本周期没有计划任务，因此完成率不适用" : completion.value() + "%";
-        report.setNarrative("本周期有效学习 " + time.value() + " 秒，任务完成率为 " + completionText + "。报告数字来自统一统计服务；建议结合掌握度置信度安排下一阶段学习。");
+        if (!pythonAi.isConfigured()) throw new AiModelException(ErrorCode.SERVICE_TEMPORARILY_UNAVAILABLE);
+        report.setNarrative(generateNarrative(o, r));
         report.setStatus("COMPLETED");
         report.setCreatedAt(Instant.now());
         reportMapper.insert(report);
         return report;
+    }
+
+    private String generateNarrative(Overview o, Range r) {
+        Metric completion = o.metrics().get("taskCompletionRate");
+        Metric time = o.metrics().get("effectiveStudySeconds");
+        Metric onTime = o.metrics().get("onTimeCompletionRate");
+        Metric overdue = o.metrics().get("overdueRate");
+        long totalSeconds = time == null || time.value() == null ? 0 : ((Number) time.value()).longValue();
+        String completionText = completion == null || completion.value() == null ? "无计划任务" : completion.value() + "%";
+        String onTimeText = onTime == null || onTime.value() == null ? "不适用" : onTime.value() + "%";
+        String overdueText = overdue == null || overdue.value() == null ? "不适用" : overdue.value() + "%";
+        StringBuilder masteryText = new StringBuilder();
+        for (Map<String, Object> m : o.mastery()) {
+            masteryText.append(m.get("name")).append("(掌握度:").append(m.get("score")).append(",置信度:").append(m.get("confidence")).append(") ");
+        }
+        String userPrompt = "统计区间：" + r.start() + " 至 " + r.end() + "\n"
+                + "有效学习时间：" + (totalSeconds / 60) + " 分钟\n"
+                + "任务完成率：" + completionText + "\n"
+                + "准时完成率：" + onTimeText + "\n"
+                + "逾期率：" + overdueText + "\n"
+                + "知识点掌握：" + (masteryText.length() == 0 ? "暂无" : masteryText.toString().trim()) + "\n"
+                + "请基于以上统计生成一段简洁的中文学习总结（150字以内），指出本期亮点和下阶段改进建议。直接输出总结文字。";
+        AiModelClient.Completion result = pythonAi.complete(
+                "你是学情分析助手。根据用户的学习统计指标，生成简洁、有针对性的中文总结。直接输出总结文字，不要 Markdown、JSON 或额外说明。",
+                userPrompt);
+        String content = result.content().trim();
+        if (content.isBlank() || content.length() > 1000) throw new AiModelException(ErrorCode.MODEL_PROVIDER_ERROR);
+        return content;
     }
 
     public List<StudyReportEntity> reports() {

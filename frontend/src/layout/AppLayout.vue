@@ -16,7 +16,7 @@ const primaryMenu = [
   { path: '/dashboard', label: '总览', icon: House },
   { path: '/onboarding', label: '画像', icon: User },
   { path: '/goals', label: '目标', icon: TrendCharts },
-  { path: '/today', label: '今天', icon: Stopwatch },
+  { path: '/today', label: '今日任务', icon: Stopwatch },
   { path: '/plans', label: 'AI 计划', icon: Operation },
   { path: '/qa', label: '问答', icon: Reading },
 ]
@@ -51,7 +51,7 @@ const journeyGroups = computed(() => [
 const routeTitle = computed(() => String(route.meta.title || '学习空间'))
 const routeHint = computed(() => {
   const found = primaryMenu.find((item) => route.path.startsWith(item.path))
-  if (found) return found.label === '今天' ? '专注于此刻的一小步' : '你的自适应学习空间'
+  if (found) return found.path === '/today' ? '专注于此刻的一小步' : '你的自适应学习空间'
   return '探索、成长、沉淀'
 })
 

@@ -9,7 +9,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 
-from app.api import goals, health, model, profile, rag
+from app.api import goals, health, model, plans, profile, rag, taskchat
 from app.config import Settings, get_settings
 from app.core.errors import (
     ServiceError,
@@ -18,6 +18,7 @@ from app.core.errors import (
     validation_error_handler,
 )
 from app.goals.service import GoalRecommendationAiService
+from app.plans.service import PlanRecommendationAiService
 from app.model.client import OpenAICompatibleClient
 from app.model.schemas import ModelClient
 from app.profile.service import ProfileInterviewAiService
@@ -25,6 +26,8 @@ from app.rag.answer import RagAnswerService
 from app.rag.embeddings import EmbeddingProvider, build_embedding_provider
 from app.rag.retrieval import RagRetrievalService
 from app.rag.vector_store import QdrantVectorStore
+from app.taskchat.search import WebSearcher
+from app.taskchat.service import TaskChatAiService
 
 logger = logging.getLogger("ai-service")
 
@@ -50,10 +53,20 @@ def create_app(
         app.state.vector_store = vector_store or QdrantVectorStore(configured)
         app.state.profile_service = ProfileInterviewAiService(app.state.model_client)
         app.state.goal_recommendation_service = GoalRecommendationAiService(app.state.model_client)
+        app.state.plan_recommendation_service = PlanRecommendationAiService(app.state.model_client)
         app.state.retrieval_service = RagRetrievalService(
             configured, app.state.embeddings, app.state.vector_store
         )
         app.state.answer_service = RagAnswerService(configured, app.state.model_client)
+        app.state.task_chat_service = TaskChatAiService(
+            configured,
+            app.state.model_client,
+            app.state.retrieval_service,
+            WebSearcher(
+                max_results=configured.search_max_results,
+                timeout_seconds=configured.search_timeout_seconds,
+            ),
+        )
         yield
         close = getattr(app.state.model_client, "close", None)
         if close is not None:
@@ -91,7 +104,9 @@ def create_app(
     app.include_router(model.router)
     app.include_router(profile.router)
     app.include_router(goals.router)
+    app.include_router(plans.router)
     app.include_router(rag.router)
+    app.include_router(taskchat.router)
     return app
 
 

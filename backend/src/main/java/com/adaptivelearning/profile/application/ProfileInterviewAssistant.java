@@ -7,6 +7,7 @@ import com.adaptivelearning.shared.ai.AiStreamCancelledException;
 import com.adaptivelearning.shared.ai.ModelRunService;
 import com.adaptivelearning.shared.ai.PythonAiServiceClient;
 import com.adaptivelearning.shared.exception.BusinessException;
+import com.adaptivelearning.shared.exception.ErrorCode;
 import com.adaptivelearning.shared.ratelimit.RedisRateLimiter;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -82,39 +83,32 @@ public class ProfileInterviewAssistant {
                                  String userMessage, List<DirectionOption> directions) {
         ProfileInterviewSafetyPolicy.validate(userMessage);
         if (pythonAi != null && pythonAi.isConfigured()) {
-            long begin = System.nanoTime();
+            rateLimiter.requireModelAllowed(userId);
             try {
-                rateLimiter.requireModelAllowed(userId);
                 AiModelClient.Completion completion = pythonAi.profileTurnStreaming(userId, sessionId, current,
                         directions, recent(transcript), userMessage, ignored -> { });
                 AssistantTurn turn = withReadyPrompt(parseAiTurn(current, completion.content(), directions, userMessage));
                 safeRecordSuccess(userId, userMessage, completion);
                 return turn;
-            } catch (AiModelException | BusinessException | IllegalArgumentException e) {
-                long latency = (System.nanoTime() - begin) / 1_000_000;
-                safeRecordFailure(userId, userMessage, latency, errorCode(e));
-                log.warn("Python profile turn fell back after {} ms: {}", latency, e.getClass().getSimpleName());
-                Draft extracted = deterministicExtract(current, userMessage, directions);
-                return withReadyPrompt(new AssistantTurn(fallbackQuestion(extracted), extracted, "GUIDED"));
+            } catch (IllegalArgumentException e) {
+                safeRecordFailure(userId, userMessage, 0, "MODEL_OUTPUT_INVALID");
+                throw new AiModelException(ErrorCode.MODEL_PROVIDER_ERROR, e);
             }
         }
         if (modelClient.isConfigured()) {
-            long begin = System.nanoTime();
+            rateLimiter.requireModelAllowed(userId);
             try {
-                rateLimiter.requireModelAllowed(userId);
                 AiModelClient.Completion completion = modelClient.complete(SYSTEM_PROMPT,
                         prompt(current, transcript, userMessage, directions));
                 AssistantTurn turn = withReadyPrompt(parseAiTurn(current, completion.content(), directions, userMessage));
                 safeRecordSuccess(userId, userMessage, completion);
                 return turn;
-            } catch (AiModelException | BusinessException | IllegalArgumentException e) {
-                long latency = (System.nanoTime() - begin) / 1_000_000;
-                safeRecordFailure(userId, userMessage, latency, errorCode(e));
-                log.warn("Profile interview AI turn fell back after {} ms: {}", latency, e.getClass().getSimpleName());
+            } catch (IllegalArgumentException e) {
+                safeRecordFailure(userId, userMessage, 0, "MODEL_OUTPUT_INVALID");
+                throw new AiModelException(ErrorCode.MODEL_PROVIDER_ERROR, e);
             }
         }
-        Draft extracted = deterministicExtract(current, userMessage, directions);
-        return withReadyPrompt(new AssistantTurn(fallbackQuestion(extracted), extracted, "GUIDED"));
+        throw new AiModelException(ErrorCode.SERVICE_TEMPORARILY_UNAVAILABLE);
     }
 
     public AssistantTurn respondStreaming(long userId, Draft current, List<Transcript> transcript,
@@ -129,10 +123,9 @@ public class ProfileInterviewAssistant {
                                           StreamOutput assistantOutput) {
         ProfileInterviewSafetyPolicy.validate(userMessage);
         if (pythonAi != null && pythonAi.isConfigured()) {
-            long begin = System.nanoTime();
+            rateLimiter.requireModelAllowed(userId);
             StringBuilder visible = new StringBuilder();
             try {
-                rateLimiter.requireModelAllowed(userId);
                 AiModelClient.Completion completion = pythonAi.profileTurnStreaming(userId, sessionId, current,
                         directions, recent(transcript), userMessage, delta -> {
                             visible.append(delta);
@@ -145,28 +138,15 @@ public class ProfileInterviewAssistant {
                 return turn;
             } catch (AiStreamCancelledException e) {
                 throw e;
-            } catch (AiModelException | BusinessException | IllegalArgumentException e) {
-                long latency = (System.nanoTime() - begin) / 1_000_000;
-                safeRecordFailure(userId, userMessage, latency, errorCode(e));
-                AssistantTurn preserved = preserveVisibleAiTurn(current, userMessage, directions, visible.toString());
-                if (preserved != null) {
-                    log.warn("Python profile stream produced visible text but failed structured validation after {} ms: {}",
-                            latency, e.getClass().getSimpleName());
-                    return preserved;
-                }
-                log.warn("Python profile stream fell back after {} ms: {}", latency,
-                        e.getClass().getSimpleName());
-                Draft extracted = deterministicExtract(current, userMessage, directions);
-                String fallback = fallbackQuestion(extracted);
-                assistantOutput.replace(fallback);
-                return new AssistantTurn(fallback, extracted, "GUIDED");
+            } catch (IllegalArgumentException e) {
+                safeRecordFailure(userId, userMessage, 0, "MODEL_OUTPUT_INVALID");
+                throw new AiModelException(ErrorCode.MODEL_PROVIDER_ERROR, e);
             }
         }
         if (modelClient.isConfigured()) {
-            long begin = System.nanoTime();
             AssistantMessageProjector projector = new AssistantMessageProjector(assistantOutput::delta);
+            rateLimiter.requireModelAllowed(userId);
             try {
-                rateLimiter.requireModelAllowed(userId);
                 AiModelClient.Completion completion = modelClient.completeStreaming(SYSTEM_PROMPT,
                         prompt(current, transcript, userMessage, directions), projector::accept);
                 AssistantTurn parsed = parseAiTurn(current, completion.content(), directions, userMessage);
@@ -177,24 +157,12 @@ public class ProfileInterviewAssistant {
                 return turn;
             } catch (AiStreamCancelledException e) {
                 throw e;
-            } catch (AiModelException | BusinessException | IllegalArgumentException e) {
-                long latency = (System.nanoTime() - begin) / 1_000_000;
-                safeRecordFailure(userId, userMessage, latency, errorCode(e));
-                AssistantTurn preserved = preserveVisibleAiTurn(current, userMessage, directions,
-                        projector.emittedText());
-                if (preserved != null) {
-                    log.warn("Profile interview AI stream produced visible text but failed structured validation after {} ms: {}",
-                            latency, e.getClass().getSimpleName());
-                    return preserved;
-                }
-                log.warn("Profile interview AI stream fell back after {} ms: {}", latency,
-                        e.getClass().getSimpleName());
+            } catch (IllegalArgumentException e) {
+                safeRecordFailure(userId, userMessage, 0, "MODEL_OUTPUT_INVALID");
+                throw new AiModelException(ErrorCode.MODEL_PROVIDER_ERROR, e);
             }
         }
-        Draft extracted = deterministicExtract(current, userMessage, directions);
-        String fallback = fallbackQuestion(extracted);
-        assistantOutput.replace(fallback);
-        return withReadyPrompt(new AssistantTurn(fallback, extracted, "GUIDED"));
+        throw new AiModelException(ErrorCode.SERVICE_TEMPORARILY_UNAVAILABLE);
     }
 
     public interface StreamOutput {

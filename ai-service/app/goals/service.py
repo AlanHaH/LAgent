@@ -22,42 +22,51 @@ class GoalRecommendationAiService:
         self._model = model_client
 
     async def recommend(self, request: GoalRecommendationRequest) -> GoalRecommendationCompleted:
-        completion = await self._model.complete(
-            GOAL_RECOMMENDATION_SYSTEM_PROMPT,
-            self._user_prompt(request),
-            max_output_tokens=1800,
-        )
-        output = self._parse(completion.content)
-        allowed_ids = {item.id for item in request.directions if item.id is not None}
-        remaining_days = max(
-            3,
-            (request.plan_end_date - max(request.today, request.plan_start_date)).days + 1,
-        )
-        normalized: list[GoalRecommendationItem] = []
-        for item in output.recommendations[: request.count]:
-            if item.direction_id not in allowed_ids:
-                raise ServiceError(
-                    "AI_OUTPUT_INVALID",
-                    "目标推荐引用了画像之外的学习方向",
-                    status_code=422,
+        last_error: ServiceError | None = None
+        for attempt in range(3):
+            try:
+                completion = await self._model.complete(
+                    GOAL_RECOMMENDATION_SYSTEM_PROMPT,
+                    self._user_prompt(request),
+                    max_output_tokens=1800,
                 )
-            criteria = list(dict.fromkeys(text.strip() for text in item.success_criteria if text.strip()))
-            milestones = list(dict.fromkeys(text.strip() for text in item.milestones if text.strip()))
-            if len(criteria) < 2 or len(milestones) < 2:
-                raise ServiceError("AI_OUTPUT_INVALID", "目标推荐缺少可验收结果", status_code=422)
-            normalized.append(item.model_copy(update={
-                "duration_days": min(item.duration_days, remaining_days),
-                "weekly_budget_minutes": min(item.weekly_budget_minutes, request.weekly_available_minutes),
-                "success_criteria": criteria[:5],
-                "milestones": milestones[:5],
-            }))
-        if not normalized:
-            raise ServiceError("AI_OUTPUT_INVALID", "模型未返回目标推荐", status_code=422)
-        return GoalRecommendationCompleted(
-            recommendations=normalized,
-            prompt_version=GOAL_RECOMMENDATION_PROMPT_VERSION,
-            model_run=self._model_run(completion),
-        )
+                output = self._parse(completion.content)
+                allowed_ids = {item.id for item in request.directions if item.id is not None}
+                remaining_days = max(
+                    3,
+                    (request.plan_end_date - max(request.today, request.plan_start_date)).days + 1,
+                )
+                normalized: list[GoalRecommendationItem] = []
+                for item in output.recommendations[: request.count]:
+                    if item.direction_id not in allowed_ids:
+                        raise ServiceError(
+                            "AI_OUTPUT_INVALID",
+                            "目标推荐引用了画像之外的学习方向",
+                            status_code=422,
+                        )
+                    criteria = list(dict.fromkeys(text.strip() for text in item.success_criteria if text.strip()))
+                    milestones = list(dict.fromkeys(text.strip() for text in item.milestones if text.strip()))
+                    if len(criteria) < 2 or len(milestones) < 2:
+                        raise ServiceError("AI_OUTPUT_INVALID", "目标推荐缺少可验收结果", status_code=422)
+                    normalized.append(item.model_copy(update={
+                        "duration_days": max(3, min(item.duration_days, remaining_days)),
+                        "weekly_budget_minutes": min(item.weekly_budget_minutes, request.weekly_available_minutes),
+                        "success_criteria": criteria[:5],
+                        "milestones": milestones[:5],
+                    }))
+                if not normalized:
+                    raise ServiceError("AI_OUTPUT_INVALID", "模型未返回目标推荐", status_code=422)
+                return GoalRecommendationCompleted(
+                    recommendations=normalized,
+                    prompt_version=GOAL_RECOMMENDATION_PROMPT_VERSION,
+                    model_run=self._model_run(completion),
+                )
+            except ServiceError as error:
+                if error.code == "AI_OUTPUT_INVALID" and attempt < 2:
+                    last_error = error
+                    continue
+                raise
+        raise last_error or ServiceError("AI_OUTPUT_INVALID", "模型未返回目标推荐", status_code=422)
 
     @staticmethod
     def _user_prompt(request: GoalRecommendationRequest) -> str:
@@ -78,7 +87,10 @@ class GoalRecommendationAiService:
                 "AI_OUTPUT_INVALID",
                 "目标推荐不符合结构要求",
                 status_code=422,
-                details={"validationErrors": len(error.errors())},
+                details={
+                    "validationErrors": len(error.errors()),
+                    "fields": [{"loc": ".".join(str(p) for p in e.get("loc", ())), "msg": e.get("msg", "")} for e in error.errors()[:10]],
+                },
             ) from error
 
     @staticmethod

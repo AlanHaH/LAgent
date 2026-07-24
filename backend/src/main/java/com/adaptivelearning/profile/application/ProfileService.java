@@ -2,6 +2,9 @@ package com.adaptivelearning.profile.application;
 
 import com.adaptivelearning.profile.domain.*;
 import com.adaptivelearning.profile.infrastructure.ProfileMappers.*;
+import com.adaptivelearning.shared.ai.AiModelClient;
+import com.adaptivelearning.shared.ai.AiModelException;
+import com.adaptivelearning.shared.ai.PythonAiServiceClient;
 import com.adaptivelearning.shared.exception.BusinessException;
 import com.adaptivelearning.shared.exception.ErrorCode;
 import com.adaptivelearning.shared.security.SecurityUtils;
@@ -38,6 +41,7 @@ public class ProfileService {
     private final JdbcTemplate jdbc;
     private final ObjectMapper objectMapper;
     private final AuditService audit;
+    private final PythonAiServiceClient pythonAi;
 
     public record DirectionInput(Long directionId, String customDirection, String currentStage, boolean primary) {}
     public record ProfileInput(String timezone, int weekStart, Integer planPeriodDays,
@@ -210,7 +214,6 @@ public class ProfileService {
         job.setStatus("RUNNING"); job.setCreatedAt(Instant.now()); jobMapper.insert(job);
         List<SelfAssessmentEntity> assessments = selfAssessmentMapper.selectList(new LambdaQueryWrapper<SelfAssessmentEntity>()
                 .eq(SelfAssessmentEntity::getUserId, profile.getUserId()));
-        BigDecimal confidence = assessments.isEmpty() ? new BigDecimal("0.10") : new BigDecimal("0.20");
         List<ProfileDirectionEntity> generatedDirections = directionMapper.selectList(
                 new LambdaQueryWrapper<ProfileDirectionEntity>()
                         .eq(ProfileDirectionEntity::getProfileId, profile.getId())
@@ -220,6 +223,9 @@ public class ProfileService {
         int weeklyAvailableMinutes = ruleMapper.selectList(new LambdaQueryWrapper<AvailabilityRuleEntity>()
                         .eq(AvailabilityRuleEntity::getUserId, profile.getUserId())).stream()
                 .mapToInt(AvailabilityRuleEntity::getAvailableMinutes).sum();
+        if (!pythonAi.isConfigured()) throw new AiModelException(ErrorCode.SERVICE_TEMPORARILY_UNAVAILABLE);
+        ProfileAnalysis analysis = generateProfileAnalysis(profile, generatedDirections, generatedPreference, weeklyAvailableMinutes, assessments.size());
+        BigDecimal confidence = analysis.confidence();
         Map<String, Object> snapshot = new LinkedHashMap<>();
         snapshot.put("timezone", profile.getTimezone()); snapshot.put("generatedAt", Instant.now());
         snapshot.put("planStartDate", profile.getPlanStartDate()); snapshot.put("planEndDate", profile.getPlanEndDate());
@@ -236,9 +242,9 @@ public class ProfileService {
         snapshot.put("preference", generatedPreference);
         snapshot.put("weeklyAvailableMinutes", weeklyAvailableMinutes);
         snapshot.put("source", Map.of("profileVersion", profile.getVersion(), "selfAssessmentCount", assessments.size()));
-        snapshot.put("confidence", confidence); snapshot.put("recommendedDifficulty", assessments.isEmpty() ? 1 : 2);
-        snapshot.put("dailyRecommendedTasks", 2);
-        snapshot.put("riskNotices", assessments.isEmpty() ? List.of("尚无诊断或自评证据，当前画像为低置信度") : List.of("当前仅含自评证据，建议完成诊断"));
+        snapshot.put("confidence", confidence); snapshot.put("recommendedDifficulty", analysis.difficulty());
+        snapshot.put("dailyRecommendedTasks", analysis.dailyTasks());
+        snapshot.put("riskNotices", analysis.riskNotices());
         ProfileVersionEntity version = new ProfileVersionEntity();
         version.setProfileId(profile.getId()); version.setVersionNo(profile.getCurrentVersionNo() + 1);
         version.setSnapshotJson(json(snapshot)); version.setConfidence(confidence); version.setTriggerType("USER_REQUEST");
@@ -247,6 +253,40 @@ public class ProfileService {
         profile.setCurrentVersionNo(version.getVersionNo()); profile.setProfileStatus("GENERATED"); profileMapper.updateById(profile);
         job.setProfileVersionId(version.getId()); job.setStatus("SUCCEEDED"); job.setFinishedAt(Instant.now()); jobMapper.updateById(job);
         return job;
+    }
+
+    private record ProfileAnalysis(BigDecimal confidence, int difficulty, int dailyTasks, List<String> riskNotices) {}
+
+    private ProfileAnalysis generateProfileAnalysis(UserProfileEntity profile, List<ProfileDirectionEntity> directions,
+                                                    PreferenceView preference, int weeklyMinutes, int assessmentCount) {
+        StringBuilder dirText = new StringBuilder();
+        for (ProfileDirectionEntity d : directions) {
+            dirText.append(d.getCustomDirection() != null ? d.getCustomDirection() : directionName(d.getDirectionId()))
+                    .append("(").append(d.getCurrentStage()).append(") ");
+        }
+        String userPrompt = "学习方向与阶段：" + (dirText.length() == 0 ? "未指定" : dirText.toString().trim()) + "\n"
+                + "每周可用学习时间：" + weeklyMinutes + " 分钟\n"
+                + "学习偏好：粒度=" + (preference == null ? "默认" : preference.taskGranularity())
+                + ",专注时长=" + (preference == null ? "默认" : preference.focusMinutes() + "分钟") + "\n"
+                + "自评证据数量：" + assessmentCount + "\n"
+                + "背景：" + (profile.getBackgroundText() == null || profile.getBackgroundText().isBlank() ? "无" : profile.getBackgroundText()) + "\n"
+                + "请评估并输出 JSON：{\"confidence\":0到1的两位小数,\"recommendedDifficulty\":1到5的整数,\"dailyRecommendedTasks\":1到4的整数,\"riskNotices\":[1到3条中文风险提示]}";
+        AiModelClient.Completion result = pythonAi.complete(
+                "你是学习画像分析助手。根据用户的学习方向、可用时间、偏好和证据数量，评估画像置信度、推荐难度、每日建议任务数和风险提示。只输出 JSON，不要 Markdown 或解释。",
+                userPrompt);
+        try {
+            var root = objectMapper.readTree(result.content().trim());
+            BigDecimal confidence = root.path("confidence").isNumber() ? root.path("confidence").decimalValue() : new BigDecimal("0.15");
+            if (confidence.compareTo(BigDecimal.ZERO) < 0 || confidence.compareTo(BigDecimal.ONE) > 0) confidence = new BigDecimal("0.15");
+            int difficulty = root.path("recommendedDifficulty").isInt() ? Math.max(1, Math.min(5, root.path("recommendedDifficulty").asInt())) : 2;
+            int dailyTasks = root.path("dailyRecommendedTasks").isInt() ? Math.max(1, Math.min(4, root.path("dailyRecommendedTasks").asInt())) : 2;
+            List<String> riskNotices = new ArrayList<>();
+            root.path("riskNotices").forEach(node -> { if (node.isTextual() && !node.asText().isBlank()) riskNotices.add(node.asText().trim()); });
+            if (riskNotices.isEmpty()) riskNotices.add("建议补充诊断或自评证据以提升画像置信度");
+            return new ProfileAnalysis(confidence, difficulty, dailyTasks, List.copyOf(riskNotices));
+        } catch (Exception e) {
+            throw new AiModelException(ErrorCode.MODEL_PROVIDER_ERROR, e);
+        }
     }
 
     public ProfileGenerationJobEntity getJob(String publicId) {

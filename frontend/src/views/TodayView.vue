@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, ref } from 'vue'
 import dayjs from 'dayjs'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { api } from '../api/http'
@@ -12,6 +12,12 @@ const session = ref<any>()
 const elapsed = ref(0)
 const note = ref({ title: '学习笔记', markdown: '', version: undefined as number | undefined })
 const timer = ref<number>()
+const openPanels = ref<string[]>([])
+const queueCollapsed = ref(false)
+const chatMessages = ref<any[]>([])
+const chatDraft = ref('')
+const chatLoading = ref(false)
+const chatScroll = ref<HTMLElement>()
 
 const entity = computed(() => selected.value?.task || {})
 const running = computed(() => Boolean(session.value) && session.value.status === 'RUNNING')
@@ -41,10 +47,37 @@ onUnmounted(() => timer.value && clearInterval(timer.value))
 async function select(row: any) {
   selected.value = row
   note.value = { title: '学习笔记', markdown: '', version: undefined }
+  chatMessages.value = []
+  chatDraft.value = ''
   try {
     const result = await api<any>({ url: `/tasks/${row.task.publicId}/note` })
     if (result?.note) note.value = { title: result.note.title, markdown: result.currentVersion?.contentMarkdown || '', version: result.note.version }
   } catch { /* empty note */ }
+}
+
+async function scrollChat() {
+  await nextTick()
+  if (chatScroll.value) chatScroll.value.scrollTop = chatScroll.value.scrollHeight
+}
+
+async function sendChat() {
+  const text = chatDraft.value.trim()
+  if (!text || chatLoading.value || !entity.value.publicId) return
+  chatDraft.value = ''
+  const history = chatMessages.value.slice(-6).map((item) => ({ role: item.role, content: item.content }))
+  chatMessages.value.push({ role: 'USER', content: text })
+  chatLoading.value = true
+  await scrollChat()
+  try {
+    const result = await api<any>({ method: 'POST', url: `/tasks/${entity.value.publicId}/chats`, data: { message: text, history } })
+    chatMessages.value.push({ role: 'ASSISTANT', content: result.answer, citations: result.citations || [], mode: result.mode })
+  } catch {
+    chatMessages.value.pop()
+    chatDraft.value = text
+  } finally {
+    chatLoading.value = false
+    await scrollChat()
+  }
 }
 
 async function jump(row: any) {
@@ -99,8 +132,24 @@ async function complete() {
   ElMessage.success('任务已完成，做得好')
 }
 
+async function earlyEnd() {
+  const note = await ElMessageBox.prompt('提前结束会停止计时并记录实际专注时长，任务将标记为「已提前结束」。', '提前结束这段任务？', {
+    inputPlaceholder: '记一句原因（可选），会写入任务记录',
+    confirmButtonText: '提前结束',
+    cancelButtonText: '再想想',
+    inputValidator: () => true,
+  }).then((result) => result.value).catch(() => null)
+  if (note === null || note === undefined) return
+  const reason = String(note).trim() ? `提前结束：${String(note).trim()}` : '提前结束'
+  await api({ method: 'POST', url: `/tasks/${entity.value.publicId}/cancellation`, data: { confirmed: true, reason } })
+  session.value = undefined
+  if (timer.value) clearInterval(timer.value)
+  await load()
+  ElMessage.success('已提前结束，实际时长与原因已记录')
+}
+
 function statusText(status: string) {
-  return ({ PLANNED: '待开始', IN_PROGRESS: '进行中', COMPLETED: '已完成', CANCELED: '已取消' } as Record<string, string>)[status] || status
+  return ({ PLANNED: '待开始', NOT_STARTED: '待开始', IN_PROGRESS: '进行中', COMPLETED: '已完成', CANCELED: '已提前结束' } as Record<string, string>)[status] || status
 }
 </script>
 
@@ -125,33 +174,41 @@ function statusText(status: string) {
       </div>
     </section>
 
-    <div class="day-layout">
-      <aside class="day-queue">
-        <div class="queue-head">
-          <div><span class="eyebrow">ITINERARY</span><h2>今日路径</h2></div>
-          <span>{{ completedCount }}/{{ tasks.length }}</span>
-        </div>
+    <div class="day-layout" :class="{ 'queue-is-collapsed': queueCollapsed }">
+      <aside class="day-queue" :class="{ collapsed: queueCollapsed }">
+        <template v-if="!queueCollapsed">
+          <div class="queue-head">
+            <div><span class="eyebrow">ITINERARY</span><h2>今日路径</h2></div>
+            <div class="queue-head-side">
+              <span>{{ completedCount }}/{{ tasks.length }}</span>
+              <button class="queue-toggle" title="收起今日路径" @click="queueCollapsed = true">⟨</button>
+            </div>
+          </div>
 
-        <div v-if="!tasks.length" class="queue-empty">
-          <span>○</span><b>这一天暂时留白</b><p>没有排期不是错误，也可以把它留给休息和自由探索。</p>
-        </div>
+          <div v-if="!tasks.length" class="queue-empty">
+            <span>○</span><b>这一天暂时留白</b><p>没有排期不是错误，也可以把它留给休息和自由探索。</p>
+          </div>
 
-        <div v-else class="queue-timeline">
-          <button v-for="(row, index) in tasks" :key="row.task.publicId" :class="{ active: entity.publicId === row.task.publicId, done: row.task.lifecycleStatus === 'COMPLETED' }" @click="select(row)">
-            <span class="queue-time">{{ row.task.scheduledStart ? dayjs(row.task.scheduledStart).format('HH:mm') : '--:--' }}</span>
-            <i>{{ row.task.lifecycleStatus === 'COMPLETED' ? '✓' : index + 1 }}</i>
-            <div><b>{{ row.task.title }}</b><small>{{ row.task.estimatedMinutes }} 分钟 · {{ statusText(row.task.lifecycleStatus) }}</small></div>
-          </button>
-        </div>
+          <div v-else class="queue-timeline">
+            <button v-for="(row, index) in tasks" :key="row.task.publicId" :class="{ active: entity.publicId === row.task.publicId, done: row.task.lifecycleStatus === 'COMPLETED', canceled: row.task.lifecycleStatus === 'CANCELED' }" @click="select(row)">
+              <span class="queue-time">{{ row.task.scheduledStart ? dayjs(row.task.scheduledStart).format('HH:mm') : '--:--' }}</span>
+              <i>{{ row.task.lifecycleStatus === 'COMPLETED' ? '✓' : index + 1 }}</i>
+              <div><b>{{ row.task.title }}</b><small>{{ row.task.estimatedMinutes }} 分钟 · {{ statusText(row.task.lifecycleStatus) }}</small></div>
+            </button>
+          </div>
 
-        <div v-if="!tasks.length && upcoming.length" class="upcoming-block">
-          <span class="eyebrow">NEXT ON YOUR PATH</span>
-          <button v-for="row in upcoming" :key="row.task.publicId" @click="jump(row)">
-            <span>{{ dayjs(row.task.scheduledStart).format('M.D') }}</span>
-            <div><b>{{ row.task.title }}</b><small>{{ dayjs(row.task.scheduledStart).format('HH:mm') }} · 点击进入</small></div>
-            <i>↗</i>
-          </button>
-        </div>
+          <div v-if="!tasks.length && upcoming.length" class="upcoming-block">
+            <span class="eyebrow">NEXT ON YOUR PATH</span>
+            <button v-for="row in upcoming" :key="row.task.publicId" @click="jump(row)">
+              <span>{{ dayjs(row.task.scheduledStart).format('M.D') }}</span>
+              <div><b>{{ row.task.title }}</b><small>{{ dayjs(row.task.scheduledStart).format('HH:mm') }} · 点击进入</small></div>
+              <i>↗</i>
+            </button>
+          </div>
+        </template>
+        <button v-else class="queue-expand" title="展开今日路径" @click="queueCollapsed = false">
+          <span>⟩</span><b>今日路径</b><i>{{ completedCount }}/{{ tasks.length }}</i>
+        </button>
       </aside>
 
       <main class="focus-room" :class="{ waiting: !selected }">
@@ -170,42 +227,78 @@ function statusText(status: string) {
               <h2>{{ entity.title }}</h2>
               <p>{{ entity.description || '把注意力放在这一件事上。' }}</p>
             </div>
-            <button v-if="entity.lifecycleStatus !== 'COMPLETED'" class="complete-action" @click="complete"><span>✓</span>完成这一小步</button>
-            <span v-else class="complete-state">✓ 已完成</span>
+            <div class="focus-side">
+              <div v-if="session" class="mini-timer" :class="{ running }">
+                <i />
+                <span class="mini-time">{{ formatTime }}</span>
+                <small>{{ session?.status === 'PAUSED' ? '已暂停' : '专注中' }}</small>
+                <el-button v-if="running" size="small" @click="pause">暂停</el-button>
+                <el-button v-else size="small" type="primary" @click="resume">继续</el-button>
+                <button class="mini-stop" title="结束并记录这段专注" @click="stop">结束</button>
+              </div>
+              <template v-if="entity.lifecycleStatus !== 'COMPLETED' && entity.lifecycleStatus !== 'CANCELED'">
+                <button class="early-end-action" @click="earlyEnd">提前结束</button>
+                <button class="complete-action" @click="complete"><span>✓</span>完成这一小步</button>
+              </template>
+              <span v-else-if="entity.lifecycleStatus === 'COMPLETED'" class="complete-state">✓ 已完成</span>
+              <span v-else class="ended-state">已提前结束</span>
+            </div>
           </div>
 
-          <section class="focus-console">
-            <div class="focus-dial" :class="{ running }">
-              <div><span>{{ formatTime }}</span><small>{{ session?.status === 'PAUSED' ? '专注已暂停' : running ? '正在专注' : '准备好再开始' }}</small></div>
+          <section v-if="!session && entity.lifecycleStatus !== 'CANCELED'" class="focus-console">
+            <div class="focus-dial">
+              <div><span>{{ formatTime }}</span><small>准备好再开始</small></div>
             </div>
             <div class="focus-controls">
-              <el-button v-if="!session" type="primary" size="large" @click="start">开始专注</el-button>
-              <el-button v-else-if="running" size="large" @click="pause">暂停一下</el-button>
-              <el-button v-else size="large" type="primary" @click="resume">继续专注</el-button>
-              <button v-if="session" class="stop-session" @click="stop">结束并记录</button>
+              <el-button type="primary" size="large" @click="start">开始专注</el-button>
             </div>
             <div class="focus-meta"><span>预计 {{ entity.estimatedMinutes }} 分钟</span><i /><span>{{ entity.priority || 'MEDIUM' }} PRIORITY</span></div>
           </section>
 
-          <section class="workspace-notebook">
-            <el-tabs>
-              <el-tab-pane label="学习笔记">
-                <div class="note-editor">
-                  <el-input v-model="note.title" placeholder="给这段笔记一个标题" />
-                  <el-input v-model="note.markdown" type="textarea" :rows="9" placeholder="写下关键想法、疑问或下一步。支持 Markdown，保存时会生成可追溯版本。" />
-                  <div><span>VERSION {{ note.version || 'NEW' }}</span><el-button type="primary" @click="saveNote">保存这一版</el-button></div>
+          <section class="task-chat">
+            <div class="chat-head">
+              <div><span class="eyebrow">DISCUSS WITH AGENT</span><h3>和 Agent 讨论「{{ entity.title }}」</h3></div>
+              <small>优先引用你的知识库，不足时联网检索并附链接</small>
+            </div>
+            <div ref="chatScroll" class="chat-messages">
+              <div v-if="!chatMessages.length" class="chat-empty">对这段任务有疑问？可以问我概念、做法或相关资料。</div>
+              <div v-for="(item, index) in chatMessages" :key="index" class="chat-msg" :class="item.role === 'USER' ? 'user' : 'assistant'">
+                <div class="chat-bubble">{{ item.content }}</div>
+                <div v-if="item.citations?.length" class="chat-cites">
+                  <span v-if="item.mode === 'KNOWLEDGE'" class="cite-source">来自你的知识库</span>
+                  <span v-else class="cite-source web">来自联网检索</span>
+                  <a v-for="cite in item.citations" :key="cite.citationId" :href="cite.url || undefined" :target="cite.url ? '_blank' : undefined" :rel="cite.url ? 'noopener' : undefined" :class="{ web: cite.sourceType === 'WEB' }" :title="cite.quotePreview">
+                    [{{ cite.citationId }}] {{ cite.sourceType === 'WEB' ? cite.title || cite.url : cite.fileName || '知识库资料' }}
+                  </a>
                 </div>
-              </el-tab-pane>
-              <el-tab-pane label="任务线索">
-                <div class="task-clues">
-                  <div><span>计划开始</span><b>{{ entity.scheduledStart || '待安排' }}</b></div>
-                  <div><span>截止时间</span><b>{{ entity.dueAt || '未设置' }}</b></div>
-                  <div><span>预计时长</span><b>{{ entity.estimatedMinutes }} 分钟</b></div>
-                  <div><span>任务来源</span><b>{{ entity.source || '个人计划' }}</b></div>
-                </div>
-              </el-tab-pane>
-            </el-tabs>
+              </div>
+              <div v-if="chatLoading" class="chat-msg assistant"><div class="chat-bubble typing">正在思考…</div></div>
+            </div>
+            <div class="chat-input">
+              <el-input v-model="chatDraft" type="textarea" :rows="3" resize="none" placeholder="围绕当前任务提问，Enter 发送，Shift+Enter 换行" @keydown.enter.exact.prevent="sendChat" />
+              <el-button type="primary" :loading="chatLoading" :disabled="!chatDraft.trim()" @click="sendChat">发送</el-button>
+            </div>
           </section>
+
+          <el-collapse v-model="openPanels" class="workspace-notebook">
+            <el-collapse-item name="note">
+              <template #title><span class="panel-title">学习笔记</span><span class="panel-hint">点击展开记录</span></template>
+              <div class="note-editor">
+                <el-input v-model="note.title" placeholder="给这段笔记一个标题" />
+                <el-input v-model="note.markdown" type="textarea" :rows="5" placeholder="写下关键想法、疑问或下一步。支持 Markdown，保存时会生成可追溯版本。" />
+                <div><span>VERSION {{ note.version || 'NEW' }}</span><el-button type="primary" @click="saveNote">保存这一版</el-button></div>
+              </div>
+            </el-collapse-item>
+            <el-collapse-item name="clues">
+              <template #title><span class="panel-title">任务线索</span></template>
+              <div class="task-clues">
+                <div><span>计划开始</span><b>{{ entity.scheduledStart || '待安排' }}</b></div>
+                <div><span>截止时间</span><b>{{ entity.dueAt || '未设置' }}</b></div>
+                <div><span>预计时长</span><b>{{ entity.estimatedMinutes }} 分钟</b></div>
+                <div><span>任务来源</span><b>{{ entity.source || '个人计划' }}</b></div>
+              </div>
+            </el-collapse-item>
+          </el-collapse>
         </template>
       </main>
     </div>
@@ -231,11 +324,20 @@ function statusText(status: string) {
 .date-control :deep(.el-date-editor.el-input) { width: 100%; }
 .date-control :deep(.el-input__inner), .date-control :deep(.el-input__prefix) { color: #edf4ee; }
 
-.day-layout { display: grid; grid-template-columns: 350px minmax(0, 1fr); gap: 22px; }
+.day-layout { display: grid; grid-template-columns: 350px minmax(0, 1fr); gap: 22px; transition: grid-template-columns .25s ease; }
+.day-layout.queue-is-collapsed { grid-template-columns: 54px minmax(0, 1fr); }
 .day-queue { align-self: start; padding: 29px 25px; border: 1px solid rgba(255, 255, 255, .72); border-radius: 28px; background: rgba(252, 253, 249, .68); box-shadow: var(--soft-shadow), inset 0 0 0 1px rgba(38, 68, 55, .045); backdrop-filter: blur(14px); }
+.day-queue.collapsed { display: grid; justify-items: center; padding: 14px 8px; }
 .queue-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 18px; }
 .queue-head h2 { margin: 6px 0 0; font: 500 24px var(--display); }
-.queue-head > span { display: grid; place-items: center; width: 37px; height: 37px; border-radius: 50%; color: var(--green); background: var(--mint); font: 600 9px ui-monospace, monospace; }
+.queue-head-side { display: flex; align-items: center; gap: 8px; }
+.queue-head-side > span { display: grid; place-items: center; width: 37px; height: 37px; border-radius: 50%; color: var(--green); background: var(--mint); font: 600 9px ui-monospace, monospace; }
+.queue-toggle { display: grid; place-items: center; width: 24px; height: 24px; border: 1px solid rgba(31, 88, 64, .12); border-radius: 50%; color: var(--muted); background: transparent; font-size: 11px; transition: .2s; }
+.queue-toggle:hover { color: var(--green); border-color: rgba(31, 88, 64, .3); background: var(--mint); }
+.queue-expand { display: grid; justify-items: center; gap: 10px; padding: 6px 2px; border: 0; color: var(--green); background: transparent; }
+.queue-expand > span { font-size: 12px; }
+.queue-expand > b { color: var(--green); font-size: 10px; font-weight: 700; letter-spacing: .25em; writing-mode: vertical-rl; }
+.queue-expand > i { display: grid; place-items: center; min-width: 30px; height: 30px; padding: 0 4px; border-radius: 99px; color: var(--green); background: var(--mint); font: 600 8px ui-monospace, monospace; font-style: normal; }
 .queue-timeline { position: relative; }
 .queue-timeline::before { position: absolute; top: 28px; bottom: 28px; left: 49px; width: 1px; background: rgba(31, 88, 64, .13); content: ""; }
 .queue-timeline button { position: relative; z-index: 1; display: grid; grid-template-columns: 35px 31px 1fr; align-items: center; gap: 8px; width: 100%; padding: 13px 9px; border: 0; border-radius: 14px; color: var(--ink); background: transparent; text-align: left; transition: .2s; }
@@ -273,6 +375,21 @@ function statusText(status: string) {
 .complete-action { display: flex; align-items: center; gap: 8px; flex: none; padding: 7px 12px 7px 7px; border: 1px solid rgba(33, 102, 73, .13); border-radius: 99px; color: var(--green); background: #e6f0e9; font-size: 9px; font-weight: 700; }
 .complete-action span { display: grid; place-items: center; width: 24px; height: 24px; border-radius: 50%; color: #fff; background: var(--green); }
 .complete-state { padding: 8px 12px; border-radius: 99px; color: var(--green); background: var(--mint); font-size: 9px; font-weight: 700; }
+.early-end-action { padding: 7px 12px; border: 1px solid rgba(140, 151, 144, .3); border-radius: 99px; color: var(--muted); background: transparent; font-size: 9px; font-weight: 700; transition: .2s; }
+.early-end-action:hover { color: #8a6420; border-color: rgba(176, 137, 62, .4); background: rgba(243, 234, 214, .5); }
+.ended-state { padding: 8px 12px; border-radius: 99px; color: #8a6420; background: rgba(243, 234, 214, .65); font-size: 9px; font-weight: 700; }
+.queue-timeline button.canceled b { color: #9aa39e; text-decoration: line-through; }
+.queue-timeline button.canceled > i { color: #9aa39e; background: #eceeeb; }
+.focus-side { display: flex; align-items: center; gap: 10px; flex: none; }
+.mini-timer { display: flex; align-items: center; gap: 10px; padding: 8px 12px 8px 14px; border-radius: 99px; color: #eef4ef; background: radial-gradient(circle at 30% 20%, rgba(92, 150, 120, .3), transparent 60%), linear-gradient(145deg, #173f32, #102e25); box-shadow: 0 12px 28px rgba(16, 46, 37, .24); animation: mini-in .35s ease; }
+.mini-timer > i { width: 8px; height: 8px; flex: none; border-radius: 50%; background: #7e978c; }
+.mini-timer.running > i { background: #e2bd73; animation: mini-pulse 1.6s ease-in-out infinite; }
+.mini-time { font: 500 20px ui-monospace, monospace; letter-spacing: .04em; }
+.mini-timer small { color: #a2baae; font-size: 9px; letter-spacing: .06em; }
+.mini-stop { padding: 5px 6px; border: 0; color: #a8bdb3; background: transparent; font-size: 9px; transition: .2s; }
+.mini-stop:hover { color: #eef4ef; }
+@keyframes mini-pulse { 50% { box-shadow: 0 0 0 6px rgba(226, 189, 115, .16); } }
+@keyframes mini-in { from { opacity: 0; transform: translateY(-6px) scale(.94); } }
 .focus-console { display: grid; justify-items: center; margin: 0 30px; padding: 34px; border-radius: 24px; color: #eef4ef; background: radial-gradient(circle at 50% 45%, rgba(92, 150, 120, .25), transparent 30%), linear-gradient(145deg, #173f32, #102e25); }
 .focus-dial { display: grid; place-items: center; width: 210px; height: 210px; border: 1px solid rgba(233, 199, 125, .3); border-radius: 50%; box-shadow: 0 0 0 12px rgba(255, 255, 255, .025), 0 0 0 24px rgba(255, 255, 255, .015), inset 0 0 50px rgba(6, 23, 17, .18); }
 .focus-dial.running { animation: focus-pulse 3s ease-in-out infinite; }
@@ -284,7 +401,30 @@ function statusText(status: string) {
 .stop-session { padding: 9px 7px; border: 0; color: #a8bdb3; background: transparent; font-size: 9px; }
 .focus-meta { display: flex; align-items: center; gap: 10px; margin-top: 17px; color: #809e90; font-size: 8px; }
 .focus-meta i { width: 3px; height: 3px; border-radius: 50%; background: #d8b76f; }
-.workspace-notebook { padding: 21px 34px 30px; }
+.task-chat { display: grid; gap: 14px; margin: 0 30px; padding: 22px 24px 18px; border-radius: 24px; background: rgba(232, 239, 232, .38); }
+.chat-head { display: flex; align-items: flex-end; justify-content: space-between; gap: 14px; }
+.chat-head h3 { margin: 6px 0 0; font: 500 19px var(--display); }
+.chat-head > small { flex: none; max-width: 220px; color: var(--muted); font-size: 8px; line-height: 1.6; text-align: right; }
+.chat-messages { display: grid; gap: 10px; max-height: 480px; overflow-y: auto; padding-right: 4px; }
+.chat-empty { padding: 18px 10px; color: var(--muted); font-size: 10px; text-align: center; }
+.chat-msg { display: grid; gap: 6px; max-width: 82%; }
+.chat-msg.user { justify-self: end; }
+.chat-msg.assistant { justify-self: start; }
+.chat-bubble { padding: 11px 15px; border-radius: 14px; font-size: 11px; line-height: 1.75; white-space: pre-wrap; word-break: break-word; }
+.chat-msg.user .chat-bubble { color: #f2f7f3; border-bottom-right-radius: 4px; background: linear-gradient(145deg, #1d5c44, #143c2d); }
+.chat-msg.assistant .chat-bubble { color: var(--ink); border: 1px solid rgba(31, 88, 64, .1); border-bottom-left-radius: 4px; background: rgba(252, 253, 249, .9); }
+.chat-bubble.typing { color: var(--muted); }
+.chat-cites { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.cite-source { flex-basis: 100%; color: #8c9790; font-size: 8px; font-weight: 700; letter-spacing: .08em; }
+.chat-cites a { max-width: 260px; overflow: hidden; padding: 4px 9px; border: 1px solid rgba(23, 107, 80, .14); border-radius: 99px; color: var(--green); background: rgba(223, 238, 229, .6); font-size: 8px; text-decoration: none; text-overflow: ellipsis; white-space: nowrap; }
+.chat-cites a.web { border-color: rgba(176, 137, 62, .22); color: #8a6420; background: rgba(243, 234, 214, .65); }
+.chat-cites a[href]:hover { filter: brightness(.96); text-decoration: underline; }
+.chat-input { display: grid; grid-template-columns: 1fr auto; align-items: end; gap: 10px; }
+.workspace-notebook { margin: 18px 30px 0; padding: 0 24px 24px; border-top: 0; }
+.workspace-notebook :deep(.el-collapse-item__header) { font-size: 11px; }
+.workspace-notebook .panel-title { font-weight: 700; }
+.workspace-notebook .panel-hint { margin-left: 10px; color: var(--muted); font-size: 8px; font-weight: 400; }
+.workspace-notebook :deep(.el-collapse-item__content) { padding-bottom: 18px; }
 .note-editor { display: grid; gap: 11px; }
 .note-editor > div { display: flex; align-items: center; justify-content: space-between; }
 .note-editor > div > span { color: #9aa39e; font-size: 8px; font-weight: 700; letter-spacing: .1em; }
@@ -298,8 +438,10 @@ function statusText(status: string) {
 @media (max-width: 1000px) {
   .day-ribbon { grid-template-columns: 1fr auto; }
   .date-control { grid-column: 1 / -1; width: 100%; }
-  .day-layout { grid-template-columns: 1fr; }
+  .day-layout, .day-layout.queue-is-collapsed { grid-template-columns: 1fr; }
   .day-queue { position: static; }
+  .queue-expand { display: flex; align-items: center; gap: 10px; }
+  .queue-expand > b { letter-spacing: normal; writing-mode: horizontal-tb; }
   .queue-timeline { display: grid; grid-template-columns: repeat(2, 1fr); gap: 7px; }
   .queue-timeline::before { display: none; }
 }
@@ -311,10 +453,15 @@ function statusText(status: string) {
   .queue-timeline { grid-template-columns: 1fr; }
   .focus-room { min-height: 600px; }
   .focus-header { align-items: flex-start; flex-direction: column; padding: 24px 22px 18px; }
+  .focus-side { flex-wrap: wrap; }
   .focus-console { margin: 0 16px; padding: 30px 16px; }
   .focus-dial { width: 174px; height: 174px; }
   .focus-dial span { font-size: 39px; }
-  .workspace-notebook { padding: 18px 21px 25px; }
+  .task-chat { margin: 0 16px; padding: 18px 16px 14px; }
+  .chat-head { align-items: flex-start; flex-direction: column; gap: 6px; }
+  .chat-head > small { max-width: none; text-align: left; }
+  .chat-msg { max-width: 94%; }
+  .workspace-notebook { margin: 14px 16px 0; padding: 0 10px 18px; }
   .task-clues { grid-template-columns: 1fr; }
 }
 </style>

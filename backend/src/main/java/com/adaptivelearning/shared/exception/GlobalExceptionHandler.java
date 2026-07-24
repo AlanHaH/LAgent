@@ -1,5 +1,6 @@
 package com.adaptivelearning.shared.exception;
 
+import com.adaptivelearning.shared.ai.AiModelException;
 import com.adaptivelearning.shared.api.ErrorResponse;
 import jakarta.validation.ConstraintViolationException;
 import lombok.extern.slf4j.Slf4j;
@@ -22,6 +23,23 @@ public class GlobalExceptionHandler {
     ResponseEntity<ErrorResponse> business(BusinessException ex) {
         return ResponseEntity.status(ex.getCode().status())
                 .body(ErrorResponse.of(ex.getCode().name(), ex.getMessage(), ex.getDetails(), List.of()));
+    }
+
+    @ExceptionHandler(AiModelException.class)
+    ResponseEntity<ErrorResponse> aiModel(AiModelException ex) {
+        log.warn("AI model invocation failed: {}", ex.getCode());
+        return ResponseEntity.status(ex.getCode().status())
+                .body(ErrorResponse.of(ex.getCode().name(), aiModelMessage(ex.getCode()), Map.of(), List.of()));
+    }
+
+    private static String aiModelMessage(ErrorCode code) {
+        return switch (code) {
+            case SERVICE_TEMPORARILY_UNAVAILABLE -> "AI 服务未启动或暂不可用，请启动 AI 服务后重试";
+            case MODEL_PROVIDER_ERROR -> "AI 模型服务返回错误，请稍后重试";
+            case MODEL_REQUEST_TIMEOUT -> "AI 模型服务响应超时，请稍后重试";
+            case MODEL_QUOTA_EXCEEDED -> "AI 模型调用额度已用尽";
+            default -> "AI 服务暂时不可用";
+        };
     }
 
     @ExceptionHandler(MethodArgumentNotValidException.class)

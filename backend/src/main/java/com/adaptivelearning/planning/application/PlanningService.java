@@ -6,6 +6,8 @@ import com.adaptivelearning.goalproject.domain.LearningGoalEntity;
 import com.adaptivelearning.goalproject.infrastructure.GoalProjectMappers.GoalMapper;
 import com.adaptivelearning.planning.domain.*;
 import com.adaptivelearning.planning.infrastructure.PlanningMappers.*;
+import com.adaptivelearning.shared.ai.AiModelException;
+import com.adaptivelearning.shared.ai.PythonAiServiceClient;
 import com.adaptivelearning.shared.exception.BusinessException;
 import com.adaptivelearning.shared.exception.ErrorCode;
 import com.adaptivelearning.shared.security.SecurityUtils;
@@ -45,6 +47,7 @@ public class PlanningService {
     private final LearningTaskMapper taskMapper;
     private final IdempotencyService idempotency;
     private final RuleBasedPlanner ruleBasedPlanner;
+    private final PythonAiServiceClient pythonAi;
     private final HashingService hashing;
     private final ObjectMapper objectMapper;
     private final JdbcTemplate jdbc;
@@ -91,7 +94,23 @@ public class PlanningService {
                 (rs,row)->Map.of("id",rs.getLong(1),"name",rs.getString(2)),goal.getDirectionId());
         @SuppressWarnings("unchecked") Map<LocalDate,Integer> exceptions=(Map<LocalDate,Integer>)profile.get("exceptions");
         ZoneId zone=ZoneId.of((String)profile.get("timezone"));double capacity=((BigDecimal)profile.get("capacityRatio")).doubleValue();
-        List<RuleBasedPlanner.TaskDraft> drafts=ruleBasedPlanner.create(goal.getStartDate(),goal.getDueDate(),zone,slots,exceptions,capacity,knowledge,goal.getName());
+        if(!pythonAi.isConfigured())throw new AiModelException(ErrorCode.SERVICE_TEMPORARILY_UNAVAILABLE);
+        String directionName=jdbc.query("SELECT name FROM learning_direction WHERE id=? AND status='ACTIVE'",
+                rs->rs.next()?rs.getString(1):"自定义方向",goal.getDirectionId());
+        String currentStage=jdbc.query("SELECT d.current_stage FROM user_profile_direction d JOIN user_profile p ON p.id=d.profile_id WHERE d.direction_id=? AND p.user_id=? AND d.status='ACTIVE' AND d.deleted_at IS NULL ORDER BY d.id DESC LIMIT 1",
+                rs->rs.next()?rs.getString(1):"INTERMEDIATE",goal.getDirectionId(),userId);
+        int weeklyMinutes=slots.stream().mapToInt(RuleBasedPlanner.Slot::minutes).sum();
+        int taskCount=Math.max(2,Math.min(10,knowledge.isEmpty()?6:Math.min(knowledge.size()*2,10)));
+        PythonAiServiceClient.PlanRecommendationResult planResult=pythonAi.planRecommendations(
+                new PythonAiServiceClient.PlanRecommendationRequest(userId,goal.getName(),directionName,currentStage,
+                        goal.getStartDate(),goal.getDueDate(),null,
+                        knowledge.stream().map(k->new PythonAiServiceClient.PlanKnowledgePoint(
+                                ((Number)k.get("id")).longValue(),String.valueOf(k.get("name")))).toList(),
+                        request.userRequirement(),weeklyMinutes,taskCount));
+        List<RuleBasedPlanner.TaskContent> contents=planResult.tasks().stream().map(t->new RuleBasedPlanner.TaskContent(
+                t.title(),t.taskType(),t.priority(),t.estimatedMinutes(),t.knowledgePointIds(),
+                t.acceptanceCriteria(),t.reason())).toList();
+        List<RuleBasedPlanner.TaskDraft> drafts=ruleBasedPlanner.schedule(contents,goal.getStartDate(),goal.getDueDate(),zone,slots,exceptions,capacity);
         if(drafts.isEmpty())throw new BusinessException(ErrorCode.PLAN_CAPACITY_EXCEEDED,"目标周期内没有可容纳最小任务的时段");
 
         List<Map<String,Object>> afterList=new ArrayList<>();

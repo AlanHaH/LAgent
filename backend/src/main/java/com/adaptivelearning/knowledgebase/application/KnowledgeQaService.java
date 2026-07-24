@@ -55,8 +55,6 @@ public class KnowledgeQaService {
 
     @Value("${app.rag.top-k:5}")
     private int defaultTopK;
-    @Value("${app.rag.python-fallback-enabled:true}")
-    private boolean pythonFallbackEnabled;
 
     public record SearchHit(String citationId, String documentId, String documentVersionId, long chunkId,
                             @JsonIgnore long documentDbId,
@@ -82,16 +80,10 @@ public class KnowledgeQaService {
 
         List<Long> ids = spaceIds.stream().map(documents::accessibleSpace).map(KnowledgeSpaceEntity::getId).toList();
         int limit = Math.min(Math.max(1, topK == null ? defaultTopK : topK), 20);
-        if (pythonAi.isConfigured()) {
-            try {
-                return pythonSearch(query, ids, limit, begin);
-            } catch (AiModelException error) {
-                if (!pythonFallbackEnabled) throw error;
-                log.warn("Python RAG search unavailable; using Java hashed-vector fallback: {}",
-                        error.getCode());
-            }
+        if (!pythonAi.isConfigured()) {
+            throw new AiModelException(ErrorCode.SERVICE_TEMPORARILY_UNAVAILABLE);
         }
-        return legacySearch(query, ids, limit, begin);
+        return pythonSearch(query, ids, limit, begin);
     }
 
     private SearchResult pythonSearch(String query, List<Long> allowedSpaceIds, int limit, long begin) {

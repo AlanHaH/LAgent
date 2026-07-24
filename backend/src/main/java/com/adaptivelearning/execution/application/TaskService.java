@@ -8,6 +8,8 @@ import com.adaptivelearning.execution.infrastructure.ExecutionMappers.SessionMap
 import com.adaptivelearning.execution.infrastructure.LearningTaskMapper;
 import com.adaptivelearning.planning.domain.OutboxEventEntity;
 import com.adaptivelearning.planning.infrastructure.PlanningMappers.OutboxMapper;
+import com.adaptivelearning.shared.ai.AiModelException;
+import com.adaptivelearning.shared.ai.PythonAiServiceClient;
 import com.adaptivelearning.shared.exception.BusinessException;
 import com.adaptivelearning.shared.exception.ErrorCode;
 import com.adaptivelearning.shared.security.SecurityUtils;
@@ -46,6 +48,7 @@ public class TaskService {
     private final ObjectMapper objectMapper;
     private final HashingService hashing;
     private final AuditService audit;
+    private final PythonAiServiceClient pythonAi;
 
     public record TaskView(LearningTaskEntity task, String scheduleStatus, boolean ownerGoalPaused,
                            long effectiveSeconds) {
@@ -109,6 +112,10 @@ public class TaskService {
         TaskStatusPolicy.require(from, target);
         if ("CANCELED".equals(target) && (!confirmed || reason == null || reason.isBlank()))
             throw new BusinessException(ErrorCode.PLAN_CONFIRMATION_REQUIRED, "取消任务必须确认并填写原因");
+        if ("CANCELED".equals(target)) {
+            StudySessionEntity active = active(t.getId());
+            if (active != null) sessions.stop(active.getPublicId());
+        }
         if ("PAUSED".equals(target)) {
             StudySessionEntity running = running(t.getId());
             if (running != null) sessions.pause(running.getPublicId());
@@ -241,6 +248,26 @@ public class TaskService {
 
     private StudySessionEntity active(long task) {
         return sessionMapper.selectOne(new LambdaQueryWrapper<StudySessionEntity>().eq(StudySessionEntity::getTaskId, task).in(StudySessionEntity::getStatus, "RUNNING", "PAUSED"));
+    }
+
+    public PythonAiServiceClient.TaskChatResult chat(String id, String message,
+                                                     List<PythonAiServiceClient.TaskChatTurn> history) {
+        LearningTaskEntity t = owned(id);
+        if (message == null || message.isBlank() || message.length() > 2000)
+            throw new BusinessException(ErrorCode.COMMON_VALIDATION_ERROR, "消息不能为空且不能超过 2000 字");
+        if (!pythonAi.isConfigured()) throw new AiModelException(ErrorCode.SERVICE_TEMPORARILY_UNAVAILABLE);
+        long userId = SecurityUtils.currentUserId();
+        List<Long> spaceIds = jdbc.query("SELECT id FROM knowledge_space WHERE (user_id=? OR visibility='PUBLIC') AND deleted_at IS NULL",
+                (rs, row) -> rs.getLong(1), userId);
+        List<PythonAiServiceClient.TaskChatTurn> cleaned = (history == null ? List.<PythonAiServiceClient.TaskChatTurn>of() : history).stream()
+                .filter(turn -> turn != null && turn.content() != null && !turn.content().isBlank())
+                .filter(turn -> "USER".equals(turn.role()) || "ASSISTANT".equals(turn.role()))
+                .map(turn -> new PythonAiServiceClient.TaskChatTurn(turn.role(),
+                        turn.content().length() > 2000 ? turn.content().substring(0, 2000) : turn.content()))
+                .toList();
+        if (cleaned.size() > 6) cleaned = cleaned.subList(cleaned.size() - 6, cleaned.size());
+        return pythonAi.taskChat(new PythonAiServiceClient.TaskChatRequest(
+                userId, t.getTitle(), t.getTaskType(), message.trim(), cleaned, spaceIds, 5));
     }
 
     private LearningTaskEntity owned(String id) {

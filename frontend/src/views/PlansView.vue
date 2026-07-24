@@ -46,6 +46,8 @@ async function generate() {
     })
     if (job.value.planVersionId) detail.value = await api<any>({ url: `/plan-versions/${job.value.planVersionId}` })
     ElMessage.success('Agent 已生成可审阅方案，尚未修改任何正式任务')
+  } catch (e) {
+    // AI 不可用时全局拦截器已弹出错误提示
   } finally { generating.value = false }
 }
 

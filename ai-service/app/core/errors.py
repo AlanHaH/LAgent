@@ -63,6 +63,13 @@ async def unexpected_error_handler(request: Request, _: Exception) -> JSONRespon
 
 async def validation_error_handler(request: Request, error: RequestValidationError) -> JSONResponse:
     fields = [".".join(str(part) for part in item.get("loc", ())) for item in error.errors()[:20]]
+    body = await request.body()
+    try:
+        import datetime
+        with open("ai-422-debug.log", "a", encoding="utf-8") as fh:
+            fh.write(f"{datetime.datetime.now().isoformat()} fields={fields}\nbody={body.decode('utf-8', errors='replace')[:2000]}\n\n")
+    except Exception:
+        pass
     return JSONResponse(
         status_code=422,
         content={

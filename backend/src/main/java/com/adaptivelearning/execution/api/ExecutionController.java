@@ -109,4 +109,13 @@ public class ExecutionController {
     public ApiResponse<TaskService.NoteView> note(@PathVariable String id, @Valid @RequestBody NoteRequest r) {
         return ApiResponse.ok(tasks.saveNote(id, r.title(), r.markdown(), r.version()));
     }
+
+    public record ChatRequest(@NotBlank @Size(max = 2000) String message,
+                              @Size(max = 10) List<com.adaptivelearning.shared.ai.PythonAiServiceClient.TaskChatTurn> history) {
+    }
+
+    @PostMapping("/tasks/{id}/chats")
+    public ApiResponse<com.adaptivelearning.shared.ai.PythonAiServiceClient.TaskChatResult> chat(@PathVariable String id, @Valid @RequestBody ChatRequest r) {
+        return ApiResponse.ok(tasks.chat(id, r.message(), r.history()));
+    }
 }

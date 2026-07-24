@@ -38,7 +38,7 @@ class RagAnswerService:
                 prompt_version=RAG_PROMPT_VERSION,
             )
         if not self._model.configured:
-            return self._fallback(request.evidence)
+            raise ServiceError("AI_DEPENDENCY_UNAVAILABLE", "AI 模型服务未配置，无法生成回答")
 
         streamed: list[str] = []
 
@@ -46,28 +46,16 @@ class RagAnswerService:
             streamed.append(piece)
             await on_delta(piece)
 
-        try:
-            completion = await self._model.complete_streaming(
-                RAG_SYSTEM_PROMPT,
-                self._prompt(request),
-                collect,
-                max_output_tokens=min(self._settings.model_max_output_tokens, 1600),
-            )
-        except ServiceError as error:
-            if error.code in {
-                "AI_DEPENDENCY_UNAVAILABLE",
-                "AI_MODEL_TIMEOUT",
-                "AI_PROVIDER_ERROR",
-                "AI_RATE_LIMITED",
-            }:
-                fallback = self._fallback(request.evidence)
-                return fallback.model_copy(update={"replacement_required": bool(streamed)})
-            raise
+        completion = await self._model.complete_streaming(
+            RAG_SYSTEM_PROMPT,
+            self._prompt(request),
+            collect,
+            max_output_tokens=min(self._settings.model_max_output_tokens, 1600),
+        )
 
         citation_ids = self.validate_citations(completion.content, request.evidence)
         if not citation_ids:
-            fallback = self._fallback(request.evidence)
-            return fallback.model_copy(update={"replacement_required": True})
+            raise ServiceError("AI_PROVIDER_ERROR", "AI 回答缺少有效引用")
         return AnswerCompleted(
             content=completion.content,
             answer_mode="RAG_AI",
@@ -95,20 +83,6 @@ class RagAnswerService:
             evidence = candidate
         serialized = json.dumps(evidence, ensure_ascii=False, separators=(",", ":"))
         return f"<evidence>{serialized}</evidence>\n<question>{request.question}</question>"
-
-    @staticmethod
-    def _fallback(evidence: list[AnswerEvidence]) -> AnswerCompleted:
-        chosen = evidence[:3]
-        lines = ["AI 模型暂时不可用，以下是授权资料中最相关的内容："]
-        for item in chosen:
-            lines.append(f"- {item.quote_preview[:240]} [{item.citation_id}]")
-        return AnswerCompleted(
-            content="\n".join(lines),
-            answer_mode="RAG_FALLBACK",
-            evidence_level="SUFFICIENT",
-            citation_ids=[item.citation_id for item in chosen],
-            prompt_version=RAG_PROMPT_VERSION,
-        )
 
     @staticmethod
     def _model_run(completion: ModelCompletion) -> dict[str, Any]:

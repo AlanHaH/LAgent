@@ -36,4 +36,34 @@ public class RuleBasedPlanner {
         }
         return tasks;
     }
+
+    public List<TaskDraft> schedule(List<TaskContent> contents,LocalDate goalStart,LocalDate goalDue,ZoneId zone,
+                                    List<Slot> slots,Map<LocalDate,Integer> exceptions,double capacityRatio){
+        LocalDate date=LocalDate.now(zone).isAfter(goalStart)?LocalDate.now(zone):goalStart;
+        List<TaskDraft> tasks=new ArrayList<>();int idx=0;
+        while(!date.isAfter(goalDue)&&idx<contents.size()){
+            LocalDate currentDate=date;
+            List<Slot> daily=slots.stream().filter(s->s.weekday()==currentDate.getDayOfWeek().getValue()).toList();
+            int exceptionMinutes=exceptions.getOrDefault(date,-1);
+            if(exceptionMinutes==0){date=date.plusDays(1);continue;}
+            for(Slot slot:daily){
+                if(idx>=contents.size())break;
+                int raw=exceptionMinutes>=0?exceptionMinutes:slot.minutes();
+                int slotCapacity=Math.min(120,(int)Math.floor(raw*capacityRatio));
+                if(slotCapacity<15)continue;
+                TaskContent c=contents.get(idx);
+                int minutes=Math.min(c.estimatedMinutes(),slotCapacity);
+                ZonedDateTime start=ZonedDateTime.of(date,slot.start(),zone);
+                ZonedDateTime due=start.plusMinutes(minutes);
+                tasks.add(new TaskDraft(c.title(),c.taskType(),c.priority(),start,due,minutes,
+                        c.knowledgePointIds(),c.acceptance(),c.reason()));
+                idx++;break;
+            }
+            date=date.plusDays(1);
+        }
+        return tasks;
+    }
+
+    public record TaskContent(String title,String taskType,String priority,int estimatedMinutes,
+                              List<Long> knowledgePointIds,List<String> acceptance,String reason){}
 }

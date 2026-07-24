@@ -81,13 +81,38 @@ $mavenInstalls = Get-ChildItem 'H:\maven\apache-maven-*\bin\mvn.cmd' -ErrorActio
 if ($mavenInstalls) {
     $mavenExe = $mavenInstalls[0].FullName
 }
-if (-not $mavenExe) {
-    throw 'Maven 3.6.3 or newer was not found.'
+
+# H:\maven 可能损坏（缺 plexus-classworlds），先用 mvn -v 探活，失败则回退 IntelliJ 自带 maven
+function Test-MavenExe([string]$exe) {
+    if (-not $exe) { return $false }
+    try {
+        & $exe -v *> $null
+        return $LASTEXITCODE -eq 0
+    } catch {
+        return $false
+    }
+}
+
+$ideaMavenHome = 'C:\Program Files\JetBrains\IntelliJ IDEA 2025.2.4\plugins\maven\lib\maven3'
+$useIdeaMaven = $false
+if (-not (Test-MavenExe $mavenExe)) {
+    if (Test-Path (Join-Path $ideaMavenHome 'bin\m2.conf')) {
+        Write-Warning "Maven at '$mavenExe' is broken, falling back to IntelliJ bundled Maven."
+        $useIdeaMaven = $true
+    } elseif (-not $mavenExe) {
+        throw 'Maven 3.6.3 or newer was not found.'
+    } else {
+        throw "Maven at '$mavenExe' is broken (mvn -v failed) and no IntelliJ bundled Maven was found."
+    }
 }
 
 if ($ValidateOnly) {
     Write-Host 'Local backend configuration is valid.'
-    Write-Host ("Maven: {0}" -f $mavenExe)
+    if ($useIdeaMaven) {
+        Write-Host ("Maven: IntelliJ bundled ({0})" -f $ideaMavenHome)
+    } else {
+        Write-Host ("Maven: {0}" -f $mavenExe)
+    }
     $missingMail = @('MAIL_HOST', 'MAIL_USERNAME', 'MAIL_PASSWORD') |
         Where-Object { -not $config.ContainsKey($_) -or -not $config[$_] }
     if ($missingMail.Count -gt 0) {
@@ -99,7 +124,13 @@ if ($ValidateOnly) {
 Write-Host ("Starting backend at http://localhost:{0}" -f $Port)
 Push-Location $backendDir
 try {
-    & $mavenExe -s maven-settings.xml spring-boot:run
+    if ($useIdeaMaven) {
+        $m2Conf = Join-Path $ideaMavenHome 'bin\m2.conf'
+        $classworldsJar = Join-Path $ideaMavenHome 'boot\plexus-classworlds-2.9.0.jar'
+        & java "-Dmaven.home=$ideaMavenHome" "-Dmaven.multiModuleProjectDirectory=$backendDir" "-Dclassworlds.conf=$m2Conf" -classpath $classworldsJar org.codehaus.plexus.classworlds.launcher.Launcher -s maven-settings.xml spring-boot:run
+    } else {
+        & $mavenExe -s maven-settings.xml spring-boot:run
+    }
 } finally {
     Pop-Location
 }

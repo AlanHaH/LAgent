@@ -59,7 +59,7 @@ class GoalRecommendationItem(BaseModel):
     type: Literal["SKILL", "EXAM", "PROJECT"]
     description: str = Field(min_length=10, max_length=1200)
     priority: Literal["LOW", "MEDIUM", "HIGH", "URGENT"] = "MEDIUM"
-    duration_days: int = Field(alias="durationDays", ge=3, le=365)
+    duration_days: int = Field(alias="durationDays", ge=1, le=365)
     weekly_budget_minutes: int = Field(alias="weeklyBudgetMinutes", ge=10, le=6720)
     success_criteria: list[str] = Field(alias="successCriteria", min_length=2, max_length=5)
     reason: str = Field(min_length=5, max_length=500)

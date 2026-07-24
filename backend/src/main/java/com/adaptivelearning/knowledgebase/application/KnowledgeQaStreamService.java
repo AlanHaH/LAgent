@@ -1,5 +1,7 @@
 package com.adaptivelearning.knowledgebase.application;
 
+import com.adaptivelearning.shared.ai.AiModelException;
+import com.adaptivelearning.shared.exception.ErrorCode;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.security.concurrent.DelegatingSecurityContextRunnable;
@@ -52,12 +54,27 @@ public class KnowledgeQaStreamService {
                     citation -> send(emitter, disconnected, "citation.ready", citation));
             send(emitter, disconnected, "message.completed", answer);
             if (!disconnected.get()) emitter.complete();
+        } catch (AiModelException error) {
+            log.warn("Knowledge QA stream failed: {}", error.getCode());
+            send(emitter, disconnected, "message.failed", Map.of(
+                    "code", error.getCode().name(), "message", aiMessage(error.getCode())));
+            if (!disconnected.get()) emitter.complete();
         } catch (RuntimeException error) {
             log.warn("Knowledge QA stream failed: {}", error.getClass().getSimpleName());
             send(emitter, disconnected, "message.failed", Map.of(
                     "code", "KNOWLEDGE_QA_FAILED", "message", "回答生成失败"));
             if (!disconnected.get()) emitter.complete();
         }
+    }
+
+    private static String aiMessage(ErrorCode code) {
+        return switch (code) {
+            case SERVICE_TEMPORARILY_UNAVAILABLE -> "AI 服务未启动或暂不可用，请启动 AI 服务后重试";
+            case MODEL_PROVIDER_ERROR -> "AI 模型服务返回错误，请稍后重试";
+            case MODEL_REQUEST_TIMEOUT -> "AI 模型服务响应超时，请稍后重试";
+            case MODEL_QUOTA_EXCEEDED -> "AI 模型调用额度已用尽";
+            default -> "AI 服务暂时不可用";
+        };
     }
 
     private void send(SseEmitter emitter, AtomicBoolean disconnected, String event, Object data) {

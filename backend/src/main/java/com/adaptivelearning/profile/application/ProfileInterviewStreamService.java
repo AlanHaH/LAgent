@@ -1,5 +1,6 @@
 package com.adaptivelearning.profile.application;
 
+import com.adaptivelearning.shared.ai.AiModelException;
 import com.adaptivelearning.shared.ai.AiStreamCancelledException;
 import com.adaptivelearning.shared.exception.BusinessException;
 import com.adaptivelearning.shared.exception.ErrorCode;
@@ -62,6 +63,9 @@ public class ProfileInterviewStreamService {
             emitter.complete();
         } catch (AiStreamCancelledException ignored) {
             log.debug("Profile interview stream was cancelled for session {}", sessionId);
+        } catch (AiModelException e) {
+            log.warn("Profile interview AI failed for session {}: {}", sessionId, e.getCode());
+            fail(emitter, disconnected, e.getCode().name(), aiMessage(e.getCode()));
         } catch (BusinessException e) {
             fail(emitter, disconnected, e.getCode().name(), e.getMessage());
         } catch (Exception e) {
@@ -70,6 +74,16 @@ public class ProfileInterviewStreamService {
             fail(emitter, disconnected, ErrorCode.SERVICE_TEMPORARILY_UNAVAILABLE.name(),
                     "画像访谈生成失败，请稍后重试");
         }
+    }
+
+    private static String aiMessage(ErrorCode code) {
+        return switch (code) {
+            case SERVICE_TEMPORARILY_UNAVAILABLE -> "AI 服务未启动或暂不可用，请启动 AI 服务后重试";
+            case MODEL_PROVIDER_ERROR -> "AI 模型服务返回错误，请稍后重试";
+            case MODEL_REQUEST_TIMEOUT -> "AI 模型服务响应超时，请稍后重试";
+            case MODEL_QUOTA_EXCEEDED -> "AI 模型调用额度已用尽";
+            default -> "AI 服务暂时不可用";
+        };
     }
 
     private void fail(SseEmitter emitter, AtomicBoolean disconnected, String code, String message) {

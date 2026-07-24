@@ -46,6 +46,9 @@ class Settings(BaseSettings):
     rag_evidence_threshold: float = Field(default=0.18, ge=0, le=1)
     rag_vector_weight: float = Field(default=0.85, ge=0, le=1)
 
+    search_max_results: int = Field(default=5, ge=1, le=10)
+    search_timeout_seconds: float = Field(default=12, ge=3, le=60)
+
     log_level: str = "INFO"
     expose_docs: bool = True
 

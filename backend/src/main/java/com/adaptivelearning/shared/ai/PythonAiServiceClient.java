@@ -48,6 +48,9 @@ public class PythonAiServiceClient {
             this.client = null;
             return;
         }
+        ObjectMapper dateMapper = json.copy()
+                .registerModule(new com.fasterxml.jackson.datatype.jsr310.JavaTimeModule())
+                .disable(com.fasterxml.jackson.databind.SerializationFeature.WRITE_DATES_AS_TIMESTAMPS);
         SimpleClientHttpRequestFactory requestFactory = new SimpleClientHttpRequestFactory();
         requestFactory.setConnectTimeout(Duration.ofSeconds(Math.min(10, timeout.toSeconds())));
         requestFactory.setReadTimeout(timeout);
@@ -55,6 +58,8 @@ public class PythonAiServiceClient {
                 .baseUrl(stripTrailingSlash(baseUrl))
                 .requestFactory(requestFactory)
                 .defaultHeader("X-Internal-Token", internalToken)
+                .messageConverters(converters -> converters.add(0,
+                        new org.springframework.http.converter.json.MappingJackson2HttpMessageConverter(dateMapper)))
                 .build();
     }
 
@@ -135,6 +140,52 @@ public class PythonAiServiceClient {
         if (recommendations.isEmpty()) throw new AiModelException(ErrorCode.MODEL_PROVIDER_ERROR);
         return new GoalRecommendationResult(List.copyOf(recommendations),
                 data.path("promptVersion").asText("goal-recommendation-v1"));
+    }
+
+    public PlanRecommendationResult planRecommendations(PlanRecommendationRequest request) {
+        JsonNode data = post("/internal/v1/plans/recommendations", request);
+        List<PlanTaskItem> tasks = new java.util.ArrayList<>();
+        for (JsonNode item : data.path("tasks")) {
+            List<Long> kpIds = new java.util.ArrayList<>();
+            item.path("knowledgePointIds").forEach(value -> kpIds.add(value.asLong()));
+            List<String> criteria = new java.util.ArrayList<>();
+            item.path("acceptanceCriteria").forEach(value -> criteria.add(value.asText()));
+            tasks.add(new PlanTaskItem(
+                    item.path("title").asText(),
+                    item.path("taskType").asText(),
+                    item.path("priority").asText("MEDIUM"),
+                    item.path("estimatedMinutes").asInt(),
+                    List.copyOf(kpIds),
+                    List.copyOf(criteria),
+                    item.path("reason").asText()));
+        }
+        if (tasks.isEmpty()) throw new AiModelException(ErrorCode.MODEL_PROVIDER_ERROR);
+        return new PlanRecommendationResult(List.copyOf(tasks),
+                data.path("promptVersion").asText("plan-recommendation-v1"));
+    }
+
+    public TaskChatResult taskChat(TaskChatRequest request) {
+        JsonNode data = post("/internal/v1/task-chats", request);
+        List<TaskChatCitation> citations = new java.util.ArrayList<>();
+        for (JsonNode item : data.path("citations")) {
+            citations.add(new TaskChatCitation(
+                    item.path("citationId").asText(),
+                    item.path("sourceType").asText(),
+                    item.path("chunkId").isNull() ? null : item.path("chunkId").asLong(),
+                    nullableText(item, "fileName"),
+                    nullableText(item, "title"),
+                    nullableText(item, "url"),
+                    item.path("quotePreview").asText("")));
+        }
+        return new TaskChatResult(
+                data.path("answer").asText(),
+                data.path("mode").asText(),
+                List.copyOf(citations));
+    }
+
+    private static String nullableText(JsonNode node, String field) {
+        JsonNode value = node.path(field);
+        return value.isNull() || value.isMissingNode() ? null : value.asText();
     }
 
     public IndexResult index(IndexRequest request) {
@@ -355,4 +406,23 @@ public class PythonAiServiceClient {
                                          List<String> milestones) { }
     public record GoalRecommendationResult(List<GoalRecommendationItem> recommendations,
                                            String promptVersion) { }
+    public record PlanKnowledgePoint(long id, String name) { }
+    public record PlanRecommendationRequest(long userId, String goalName, String directionName,
+                                            String currentStage, LocalDate planStartDate,
+                                            LocalDate planEndDate, String backgroundText,
+                                            List<PlanKnowledgePoint> knowledgePoints,
+                                            String userRequirement, int weeklyAvailableMinutes,
+                                            int count) { }
+    public record PlanTaskItem(String title, String taskType, String priority, int estimatedMinutes,
+                               List<Long> knowledgePointIds, List<String> acceptanceCriteria,
+                               String reason) { }
+    public record PlanRecommendationResult(List<PlanTaskItem> tasks, String promptVersion) { }
+    public record TaskChatTurn(String role, String content) { }
+    public record TaskChatRequest(long userId, String taskTitle, String taskType, String message,
+                                  List<TaskChatTurn> history, List<Long> allowedSpaceIds,
+                                  int topK) { }
+    public record TaskChatCitation(String citationId, String sourceType, Long chunkId,
+                                   String fileName, String title, String url,
+                                   String quotePreview) { }
+    public record TaskChatResult(String answer, String mode, List<TaskChatCitation> citations) { }
 }

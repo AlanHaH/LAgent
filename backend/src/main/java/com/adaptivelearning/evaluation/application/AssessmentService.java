@@ -5,6 +5,9 @@ import com.adaptivelearning.evaluation.infrastructure.EvaluationMappers.*;
 import com.adaptivelearning.planning.application.IdempotencyService;
 import com.adaptivelearning.planning.domain.IdempotencyRecordEntity;
 import com.adaptivelearning.shared.api.PageResponse;
+import com.adaptivelearning.shared.ai.AiModelClient;
+import com.adaptivelearning.shared.ai.AiModelException;
+import com.adaptivelearning.shared.ai.PythonAiServiceClient;
 import com.adaptivelearning.shared.exception.BusinessException;
 import com.adaptivelearning.shared.exception.ErrorCode;
 import com.adaptivelearning.shared.security.SecurityUtils;
@@ -38,6 +41,7 @@ public class AssessmentService {
     private final JdbcTemplate jdbc;
     private final ObjectMapper json;
     private final IdempotencyService idempotency;
+    private final PythonAiServiceClient pythonAi;
 
     public record QuestionInput(String type, String stem, List<String> options, Object answer,
                                 Map<String, Object> rubric, String analysis, int difficulty,
@@ -246,10 +250,16 @@ public class AssessmentService {
                 recordEvidence(at, assessment, aq, qv, answer, score);
                 if (!correct) recordWrong(at, qv, answer);
             } else {
-                pending = true;
-                answer.setGradingStatus("PENDING_REVIEW");
-                answer.setGraderType("AI_PENDING");
+                if (!pythonAi.isConfigured()) throw new AiModelException(ErrorCode.SERVICE_TEMPORARILY_UNAVAILABLE);
+                SubjectiveGrading graded = gradeSubjective(qv, answer, aq.getScore());
+                answer.setScore(graded.score());
+                answer.setGradingStatus("GRADED");
+                answer.setGraderType("AI");
+                answer.setGraderConfidence(graded.confidence());
+                answer.setFeedback(graded.feedback());
                 answerMapper.updateById(answer);
+                total = total.add(graded.score());
+                recordEvidence(at, assessment, aq, qv, answer, graded.score());
             }
         }
         at.setTotalScore(total);
@@ -285,6 +295,8 @@ public class AssessmentService {
     }
 
     private void recordWrong(AssessmentAttemptEntity at, QuestionVersionEntity qv, AttemptAnswerEntity answer) {
+        if (!pythonAi.isConfigured()) throw new AiModelException(ErrorCode.SERVICE_TEMPORARILY_UNAVAILABLE);
+        String reasonCode = explainWrong(qv, answer);
         List<Long> kps = jdbc.query("SELECT knowledge_point_id FROM question_knowledge_point WHERE question_version_id=?", (rs, row) -> rs.getLong(1), qv.getId());
         for (Long kp : kps) {
             WrongQuestionEntity w = wrongMapper.selectOne(new LambdaQueryWrapper<WrongQuestionEntity>().eq(WrongQuestionEntity::getUserId, at.getUserId()).eq(WrongQuestionEntity::getQuestionVersionId, qv.getId()).eq(WrongQuestionEntity::getKnowledgePointId, kp));
@@ -297,10 +309,52 @@ public class AssessmentService {
                 w.setWrongCount(1);
             } else w.setWrongCount(w.getWrongCount() + 1);
             w.setLastWrongAt(Instant.now());
-            w.setAiReasonCode("CONCEPT_UNCLEAR");
+            w.setAiReasonCode(reasonCode);
             if (w.getId() == null) wrongMapper.insert(w);
             else wrongMapper.updateById(w);
         }
+    }
+
+    private record SubjectiveGrading(BigDecimal score, BigDecimal confidence, String feedback) {}
+
+    private SubjectiveGrading gradeSubjective(QuestionVersionEntity qv, AttemptAnswerEntity answer, BigDecimal maxScore) {
+        String userPrompt = "题目：" + qv.getStem() + "\n"
+                + "参考答案：" + qv.getAnswerJson() + "\n"
+                + "评分标准：" + (qv.getRubricJson() == null ? "无" : qv.getRubricJson()) + "\n"
+                + "学生答案：" + answer.getAnswerJson() + "\n"
+                + "满分：" + maxScore + "\n"
+                + "请评分并输出 JSON：{\"score\":0到满分的数值,\"confidence\":0到1的置信度,\"feedback\":\"中文反馈\"}";
+        AiModelClient.Completion result = pythonAi.complete(
+                "你是学习评估助手。根据题目、参考答案和评分标准，对学生答案评分。只输出 JSON，不要 Markdown 或解释。",
+                userPrompt);
+        try {
+            var root = json.readTree(result.content().trim());
+            BigDecimal score = root.path("score").isNumber() ? root.path("score").decimalValue() : BigDecimal.ZERO;
+            if (score.compareTo(BigDecimal.ZERO) < 0) score = BigDecimal.ZERO;
+            if (score.compareTo(maxScore) > 0) score = maxScore;
+            BigDecimal confidence = root.path("confidence").isNumber() ? root.path("confidence").decimalValue() : new BigDecimal("0.5");
+            if (confidence.compareTo(BigDecimal.ZERO) < 0 || confidence.compareTo(BigDecimal.ONE) > 0) confidence = new BigDecimal("0.5");
+            String feedback = root.path("feedback").isTextual() ? root.path("feedback").asText().trim() : "已评分";
+            if (feedback.length() > 500) feedback = feedback.substring(0, 500);
+            return new SubjectiveGrading(score, confidence, feedback);
+        } catch (Exception e) {
+            throw new AiModelException(ErrorCode.MODEL_PROVIDER_ERROR, e);
+        }
+    }
+
+    private String explainWrong(QuestionVersionEntity qv, AttemptAnswerEntity answer) {
+        String userPrompt = "题目：" + qv.getStem() + "\n"
+                + "正确答案：" + qv.getAnswerJson() + "\n"
+                + "学生答案：" + answer.getAnswerJson() + "\n"
+                + "解析：" + (qv.getAnalysis() == null ? "无" : qv.getAnalysis()) + "\n"
+                + "请分析错误原因，只输出一个归因码：CONCEPT_UNCLEAR/CARELESS/METHOD_WRONG/KNOWLEDGE_GAP/MISREAD";
+        AiModelClient.Completion result = pythonAi.complete(
+                "你是错题分析助手。根据题目和学生答案分析错误原因，只输出一个归因码，不要其他文字。",
+                userPrompt);
+        String content = result.content().trim().toUpperCase();
+        if (!Set.of("CONCEPT_UNCLEAR", "CARELESS", "METHOD_WRONG", "KNOWLEDGE_GAP", "MISREAD").contains(content))
+            throw new AiModelException(ErrorCode.MODEL_PROVIDER_ERROR);
+        return content;
     }
 
     public AttemptResult result(String attemptId) {

@@ -108,6 +108,8 @@ async function recommendGoals() {
     })
     recommendationMeta.value = result
     recommendations.value = result.recommendations
+  } catch (e) {
+    // AI 不可用时全局拦截器已弹出错误提示，不渲染兜底推荐
   } finally { recommending.value = false }
 }
 

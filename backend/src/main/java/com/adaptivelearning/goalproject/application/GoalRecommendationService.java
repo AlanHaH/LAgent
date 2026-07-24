@@ -96,31 +96,21 @@ public class GoalRecommendationService {
                         .eq(LearningGoalEntity::getUserId, userId))
                 .stream().map(LearningGoalEntity::getName).filter(Objects::nonNull).toList();
 
-        List<RecommendationSeed> seeds;
-        String source;
-        if (pythonAi.isConfigured()) {
-            try {
-                PythonAiServiceClient.GoalRecommendationResult result = pythonAi.goalRecommendations(
-                        new PythonAiServiceClient.GoalRecommendationRequest(userId, LocalDate.now(), version.getId(),
-                                version.getVersionNo(), profile.getPlanStartDate(), profile.getPlanEndDate(),
-                                profile.getBackgroundText(), directions.stream().map(item ->
-                                new PythonAiServiceClient.GoalDirectionContext(item.id(), item.name(),
-                                        item.currentStage(), item.primary())).toList(),
-                                preferenceContext(preference), weeklyCapacity, existingNames, count));
-                seeds = result.recommendations().stream().map(item -> new RecommendationSeed(
-                        item.directionId(), item.name(), item.type(), item.description(), item.priority(),
-                        item.durationDays(), item.weeklyBudgetMinutes(), item.successCriteria(),
-                        item.reason(), item.milestones())).toList();
-                source = "AI";
-            } catch (AiModelException error) {
-                log.warn("AI goal recommendations unavailable; using rules: {}", error.getCode());
-                seeds = fallback(directions, weeklyCapacity, count);
-                source = "RULE_FALLBACK";
-            }
-        } else {
-            seeds = fallback(directions, weeklyCapacity, count);
-            source = "RULE_FALLBACK";
+        if (!pythonAi.isConfigured()) {
+            throw new AiModelException(ErrorCode.SERVICE_TEMPORARILY_UNAVAILABLE);
         }
+        PythonAiServiceClient.GoalRecommendationResult result = pythonAi.goalRecommendations(
+                new PythonAiServiceClient.GoalRecommendationRequest(userId, LocalDate.now(), version.getId(),
+                        version.getVersionNo(), profile.getPlanStartDate(), profile.getPlanEndDate(),
+                        profile.getBackgroundText(), directions.stream().map(item ->
+                        new PythonAiServiceClient.GoalDirectionContext(item.id(), item.name(),
+                                item.currentStage(), item.primary())).toList(),
+                        preferenceContext(preference), weeklyCapacity, existingNames, count));
+        List<RecommendationSeed> seeds = result.recommendations().stream().map(item -> new RecommendationSeed(
+                item.directionId(), item.name(), item.type(), item.description(), item.priority(),
+                item.durationDays(), item.weeklyBudgetMinutes(), item.successCriteria(),
+                item.reason(), item.milestones())).toList();
+        String source = "AI";
 
         Map<Long, String> directionNames = new HashMap<>();
         directions.forEach(item -> directionNames.put(item.id(), item.name()));
@@ -140,27 +130,6 @@ public class GoalRecommendationService {
         }).toList();
         return new RecommendationResponse(String.valueOf(version.getId()), version.getVersionNo(), Instant.now(), source,
                 recommendations);
-    }
-
-    private List<RecommendationSeed> fallback(List<DirectionContext> directions, int capacity, int count) {
-        List<RecommendationSeed> result = new ArrayList<>();
-        for (int index = 0; index < count; index++) {
-            DirectionContext direction = directions.get(index % directions.size());
-            String stage = switch (direction.currentStage()) {
-                case "ADVANCED" -> "深化";
-                case "INTERMEDIATE" -> "系统掌握";
-                default -> "建立";
-            };
-            String name = stage + direction.name() + "知识体系" + (index == 0 ? "" : "（路径 " + (index + 1) + "）");
-            result.add(new RecommendationSeed(direction.id(), name, "SKILL",
-                    "围绕核心文档、阶段练习和可检查的书面成果推进，形成能够复述、应用和复盘的知识结构。",
-                    "MEDIUM", index == 0 ? 30 : 45, Math.min(capacity, index == 0 ? 420 : 560),
-                    List.of("完成核心文档阅读笔记与概念地图", "完成阶段练习并达到 80% 正确率",
-                            "提交一份可复查的总结或案例分析"),
-                    "根据当前方向、阶段和每周可用时间生成的稳健目标。",
-                    List.of("建立核心概念框架", "完成针对性练习", "形成书面成果并自测")));
-        }
-        return result;
     }
 
     private Map<String, Object> preferenceContext(LearningPreferenceEntity preference) {
