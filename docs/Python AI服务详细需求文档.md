@@ -257,7 +257,7 @@ data: {"assistantMessage":"...","updates":{},"modelRun":{}}
 
 ### PAI-GOAL-009 推荐输入与输出
 
-`POST /internal/v1/goals/recommendations` 仅允许 Java 使用内部令牌调用。输入包含用户标识、当前日期、已固化画像版本、画像周期、方向与阶段、学习偏好、每周可用容量、既有目标名称和候选数量。Python 不查询 MySQL，也不接受浏览器 JWT。
+`POST /internal/v1/goals/recommendations` 仅允许 Java 使用内部令牌调用。输入包含用户标识、当前日期、已固化画像版本、画像周期、方向与阶段、学习偏好、每周可用容量、既有目标名称和候选数量。Java 在调用前会把可识别的画像自定义方向先映射为目录方向；Python 不查询 MySQL，也不接受浏览器 JWT。
 
 输出必须是结构化候选数组，每项包含目录 `directionId`、名称、类型、说明、优先级、周期天数、周预算、2～5 条成功标准、推荐理由和2～5个里程碑。Pydantic负责字段、枚举、长度与数值范围校验，并进一步保证：
 
@@ -267,7 +267,7 @@ data: {"assistantMessage":"...","updates":{},"modelRun":{}}
 - 成果只量化文档阅读、练习、测验和书面产出，不使用视频观看时长；
 - Python只返回候选，不声称已经创建、保存、激活目标或发布计划。
 
-Java收到结果后再次校验目录方向、日期、容量和画像版本归属。模型、Python或结构校验失败时，Java生成显式标记的规则候选。无论哪种来源，只有用户确认后才创建正式 `DRAFT` 目标，并保存所依据的 `profile_version_id` 和推荐快照。
+Java收到结果后再次校验目录方向、日期、容量和画像版本归属。模型、Python或结构校验失败时，Java生成显式标记的规则候选。无论哪种来源，只有用户确认后才创建正式 `DRAFT` 目标，并保存所依据的 `profile_version_id` 和推荐快照。浏览器侧的推荐响应将 `profileVersionId` 作为字符串传输和回传，避免 JavaScript 对长整型画像版本 ID 产生精度丢失。
 
 ## 6.4 Embedding 与 Qdrant 索引
 
@@ -824,3 +824,4 @@ P0 只有同时满足以下条件才算完成：
 | V1.0 | 2026-07-22 | 建立 Java确定性业务 + Python非确定性AI 的服务边界、P0接口、Qdrant/RAG、迁移和验收标准 |
 | V1.1 | 2026-07-22 | P0实现完成：FastAPI内部接口、画像/RAG真实SSE、Sentence Transformers/Hash降级、Qdrant权限过滤、Java二次鉴权、Docker与本地启动、Python/Java契约测试 |
 | V1.2 | 2026-07-23 | 新增画像驱动的结构化目标推荐、Java方向/周期/容量二次校验、规则降级、用户确认落库与画像版本来源快照 |
+| V1.3 | 2026-07-24 | 对齐目标推荐保存链路：画像自定义方向先映射目录方向，浏览器侧 `profileVersionId` 以字符串传输，避免推荐卡片保存时画像版本 ID 精度丢失 |

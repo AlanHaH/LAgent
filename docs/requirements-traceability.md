@@ -1,6 +1,6 @@
 # 需求追踪矩阵
 
-实现依据为 V1.1《基于AI Agent的自适应个人学习管理系统-详细需求文档》和 V1.2《Python AI服务详细需求文档》，二者已于 2026-07-23 同步当前 Java/Python/Qdrant 架构与画像驱动目标推荐链路。`VERIFIED` 表示代码已实现且至少有编译、自动化测试或生产构建证据；端到端数据库验收仍需按 `testing.md` 在 Docker 环境执行。
+实现依据为 V1.1《基于AI Agent的自适应个人学习管理系统-详细需求文档》和 V1.3《Python AI服务详细需求文档》，二者已于 2026-07-24 同步当前 Java/Python/Qdrant 架构、画像驱动目标推荐链路与推荐目标保存修复。`VERIFIED` 表示代码已实现且至少有编译、自动化测试或生产构建证据；端到端数据库验收仍需按 `testing.md` 在 Docker 环境执行。
 
 | 需求域 | 后端模块 | 前端入口 | 关键保证 | 状态 |
 |---|---|---|---|---|
@@ -10,7 +10,7 @@
 | FR-GPM-001~007 | `goalproject` | 目标与项目 | 自定义/画像推荐双入口、推荐确认、画像版本来源快照、目录方向约束、生命周期、里程碑、关联、进度、依赖 DAG | VERIFIED |
 | FR-AGT-001~009 | `planning` | Agent 计划 | 提案隔离、85% 容量、版本、校验、确认、幂等事务发布 | VERIFIED |
 | FR-RAG-001~009 | `knowledgebase` | 知识库、知识问答 | 文件校验、租户过滤、混合检索、引用、拒答、确认删除 | VERIFIED |
-| PAI-GOAL-001~009 | `ai-service`, `shared.ai`, `knowledgebase`, `profile`, `goalproject` | 学习画像、目标推荐、知识问答 | Python模型网关/画像/目标候选/Embedding/Qdrant/RAG，内部令牌，Java二次校验与规则降级，画像和问答真实 SSE | VERIFIED |
+| PAI-GOAL-001~009 | `ai-service`, `shared.ai`, `knowledgebase`, `profile`, `goalproject` | 学习画像、目标推荐、知识问答 | Python模型网关/画像/目标候选/Embedding/Qdrant/RAG，内部令牌，Java二次校验、目录映射与规则降级，画像和问答真实 SSE | VERIFIED |
 | FR-EXE-001~008 | `execution` | 今日执行 | 生命周期/排期状态分离、计时、跨日分摊、笔记版本、辅导 | VERIFIED |
 | FR-EVA-001~010 | `evaluation` | 评估与错题、学习分析 | 计算机/经济学公共题种子、暂存、幂等交卷、评分快照、掌握度、置信度、指标与报告 | VERIFIED |
 | NFR 安全 | `shared.security`, 全模块 ownership 查询 | 全局路由与错误处理 | BCrypt、JWT、资源归属、XSS 清理、文件隔离、公开标识 | VERIFIED |

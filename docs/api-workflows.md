@@ -22,8 +22,8 @@
 
 后续目标与计划流程：
 
-4. 可直接 `POST /goals` 创建自定义目标；自定义目标只要求 `directionId` 是有效学习目录，不要求该方向已经写入画像，因此新用户可以先建立 `DRAFT` 草稿。也可先调用 `POST /goals/recommendations`；推荐链路才要求当前已固化画像版本。
-5. 用户选择候选并编辑确认后再 `POST /goals`，提交 `sourceType`、`profileVersionId`、`recommendationId` 和推荐理由。Java 校验画像版本归属和画像方向，将来源快照与正式目标一起保存；自定义目标使用 `sourceType=CUSTOM`，只记录目录方向。随后 `POST /goals/{id}/activation` 激活。
+4. 可直接 `POST /goals` 创建自定义目标；自定义目标只要求 `directionId` 是有效学习目录，不要求该方向已经写入画像，因此新用户可以先建立 `DRAFT` 草稿。也可先调用 `POST /goals/recommendations`；推荐链路才要求当前已固化画像版本，并会先尝试把画像里的自定义方向映射到学习目录，映射失败才返回明确校验错误。
+5. 用户选择候选并编辑确认后再 `POST /goals`，提交 `sourceType`、`profileVersionId`、`recommendationId` 和推荐理由。Java 校验画像版本归属和画像方向，将来源快照与正式目标一起保存；前端应把 `profileVersionId` 当作字符串原样回传，避免 JavaScript 长整型精度丢失。自定义目标使用 `sourceType=CUSTOM`，只记录目录方向。随后 `POST /goals/{id}/activation` 激活。
 6. 画像、偏好或可用时间被修改后，画像状态回到 `DRAFT`，必须生成新画像版本才能再次请求推荐；既有目标继续绑定创建时的旧画像版本，不被新画像静默改写。
 7. `POST /goals/{id}/planning-jobs` 生成隔离提案，请求必须携带唯一 `Idempotency-Key`。
 8. `GET /plan-versions/{versionId}` 审阅阶段、变更与校验结果。

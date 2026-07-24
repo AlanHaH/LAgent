@@ -2,9 +2,9 @@
 
 ## 自动化测试
 
-```bash
+```powershell
 cd backend
-mvn test
+mvn.cmd -s maven-settings.xml test
 ```
 
 Java 测试集包含 40 个测试，覆盖策略规则、目标创建规则、画像方向异常输出防护、推荐目标方向映射、AI 引用与降级、Java→Python内部令牌/JSON/SSE 契约、Redis限流降级、验证码一次性消费/错误次数，以及 Spring MVC/H2 画像和认证集成链路。2026-07-24 使用 JDK 21 的验证结果为 `40 tests, 0 failures, 0 errors`。
