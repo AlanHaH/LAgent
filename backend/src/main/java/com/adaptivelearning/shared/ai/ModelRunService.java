@@ -22,15 +22,19 @@ public class ModelRunService {
 
     public long recordSuccess(long userId, String model, String question, List<Long> chunkIds,
                               AiModelClient.Completion completion) {
-        return insert(userId, model, question, chunkIds, "KNOWLEDGE_QA", "KNOWLEDGE_QA_V1",
+        long id = insert(userId, model, question, chunkIds, "KNOWLEDGE_QA", "KNOWLEDGE_QA_V1",
                 "SUCCESS", completion.content(),
                 completion.inputTokens(), completion.outputTokens(), completion.latencyMs(), null);
+        recordRetrievalTool(id, question, chunkIds, "SUCCESS", completion.latencyMs(), null);
+        return id;
     }
 
     public long recordFailure(long userId, String model, String question, List<Long> chunkIds,
                               long latencyMs, String errorCode) {
-        return insert(userId, model, question, chunkIds, "KNOWLEDGE_QA", "KNOWLEDGE_QA_V1", "FAILED", null,
+        long id = insert(userId, model, question, chunkIds, "KNOWLEDGE_QA", "KNOWLEDGE_QA_V1", "FAILED", null,
                 null, null, latencyMs, errorCode);
+        recordRetrievalTool(id, question, chunkIds, "FAILED", latencyMs, errorCode);
+        return id;
     }
 
     public long recordProfileInterviewSuccess(long userId, String model, String message,
@@ -62,6 +66,22 @@ public class ModelRunService {
                 promptVersion, status, toJson(inputRef), output == null ? null : hashing.sha256(output),
                 tokenIn, tokenOut, latencyMs, errorCode, Instant.now());
         return id;
+    }
+
+    private void recordRetrievalTool(long modelRunId, String question, List<Long> chunkIds,
+                                     String status, long durationMs, String errorCode) {
+        String callId = UUID.randomUUID().toString();
+        jdbc.update("""
+                INSERT INTO agent_tool_call
+                (id,model_run_id,tool_call_id,tool_name,args_hash,args_summary_json,
+                 result_status,duration_ms,error_code,created_at)
+                VALUES(?,?,?,?,?,?,?,?,?,?)
+                """, IdWorker.getId(), modelRunId, callId, "KNOWLEDGE_RETRIEVAL",
+                hashing.sha256(question), toJson(Map.of(
+                        "queryHash", hashing.sha256(question),
+                        "evidenceChunkIds", chunkIds,
+                        "resultCount", chunkIds.size())),
+                status, Math.max(0, durationMs), errorCode, Instant.now());
     }
 
     private String toJson(Object value) {

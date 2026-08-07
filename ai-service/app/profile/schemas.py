@@ -59,6 +59,28 @@ class AvailabilityUpdate(BaseModel):
     end: time
     energy_level: EnergyLevel = Field(alias="energyLevel")
 
+    @field_validator("energy_level", mode="before")
+    @classmethod
+    def normalize_energy_level(cls, value: Any) -> Any:
+        if not isinstance(value, str):
+            return value
+        normalized = value.strip().upper()
+        aliases = {
+            "低": "LOW",
+            "较低": "LOW",
+            "低精力": "LOW",
+            "中": "MEDIUM",
+            "中等": "MEDIUM",
+            "一般": "MEDIUM",
+            "普通": "MEDIUM",
+            "正常": "MEDIUM",
+            "较高": "HIGH",
+            "高": "HIGH",
+            "高精力": "HIGH",
+            "状态好": "HIGH",
+        }
+        return aliases.get(value.strip(), normalized)
+
     @model_validator(mode="after")
     def validate_range(self) -> AvailabilityUpdate:
         if self.start == self.end:

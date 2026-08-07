@@ -27,7 +27,11 @@ async def ready(request: Request) -> JSONResponse:
         embedding_ready = False
         dimension = None
     dependencies = {
-        "model": {"ready": model.configured, "name": model.model_name or None},
+        "model": {
+            "ready": model.configured,
+            "name": model.model_name or None,
+            "source": getattr(model, "source", "environment"),
+        },
         "embedding": {
             "ready": embedding_ready,
             "name": embeddings.name,

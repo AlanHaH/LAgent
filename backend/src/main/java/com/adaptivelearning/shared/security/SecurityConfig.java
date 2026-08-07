@@ -28,6 +28,7 @@ import java.util.Map;
 @RequiredArgsConstructor
 public class SecurityConfig {
     private final JwtAuthenticationFilter jwtFilter;
+    private final InternalTokenFilter internalTokenFilter;
     private final ObjectMapper objectMapper;
 
     @Bean
@@ -45,8 +46,12 @@ public class SecurityConfig {
                         // The initial SSE request is authenticated normally. Container re-dispatches after
                         // asynchronous completion must not attempt a second stateless JWT authorization.
                         .dispatcherTypeMatchers(DispatcherType.ASYNC, DispatcherType.ERROR).permitAll()
-                        .requestMatchers("/api/v1/auth/**", "/actuator/health", "/v3/api-docs/**",
+                        .requestMatchers("/api/v1/auth/**", "/api/v1/system/health",
+                                "/actuator/health", "/v3/api-docs/**",
                                 "/swagger-ui.html", "/swagger-ui/**").permitAll()
+                        // 内部信任通道：鉴权由 InternalTokenFilter 校验 X-Internal-Token 头完成，
+                        // 不参与 JWT 认证，因此在此放行。
+                        .requestMatchers("/internal/**").permitAll()
                         .requestMatchers(HttpMethod.OPTIONS, "/**").permitAll()
                         .requestMatchers("/api/v1/admin/**").hasRole("ADMIN")
                         .anyRequest().authenticated())
@@ -68,6 +73,8 @@ public class SecurityConfig {
                                     "requestId", String.valueOf(request.getAttribute("requestId"))));
                         }))
                 .addFilterBefore(jwtFilter, UsernamePasswordAuthenticationFilter.class)
+                // 内部端点先校验 X-Internal-Token（通过时自身放行），失败响应与入口点结构一致。
+                .addFilterBefore(internalTokenFilter, JwtAuthenticationFilter.class)
                 .build();
     }
 

@@ -18,6 +18,7 @@ public class LearningTaskEntity extends BaseEntity {
     private Long projectId;
     private Long milestoneId;
     private Long originPlanVersionId;
+    private Long learningBlockId;
     private String title;
     private String description;
     private String taskType;
@@ -32,4 +33,3 @@ public class LearningTaskEntity extends BaseEntity {
     private Integer rescheduleCount;
     private String acceptanceJson;
 }
-

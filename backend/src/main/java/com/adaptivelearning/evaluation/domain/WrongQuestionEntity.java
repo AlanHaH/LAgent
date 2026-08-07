@@ -22,4 +22,6 @@ public class WrongQuestionEntity {
     private Integer wrongCount;
     private String aiReasonCode;
     private String confirmedReasonCode;
+    private String status;
+    private Instant correctedAt;
 }

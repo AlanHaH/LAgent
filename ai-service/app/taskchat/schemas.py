@@ -19,7 +19,7 @@ class TaskChatRequest(BaseModel):
     task_title: str = Field(alias="taskTitle", min_length=1, max_length=200)
     task_type: str | None = Field(default=None, alias="taskType", max_length=40)
     message: str = Field(min_length=1, max_length=2000)
-    history: list[TaskChatTurn] = Field(default_factory=list, max_length=10)
+    history: list[TaskChatTurn] = Field(default_factory=list, max_length=400)
     allowed_space_ids: list[int] = Field(default_factory=list, alias="allowedSpaceIds", max_length=100)
     top_k: int = Field(default=5, alias="topK", ge=1, le=10)
 

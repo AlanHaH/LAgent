@@ -11,16 +11,27 @@ dependencies = [
   "fastapi>=0.116,<1",
   "uvicorn[standard]>=0.35,<1",
   "httpx>=0.28,<1",
+  "mcp>=1.2,<2",
   "pydantic>=2.11,<3",
   "pydantic-settings>=2.10,<3",
   "qdrant-client>=1.15,<2",
   "tenacity>=9.1,<10",
   "tzdata>=2025.2",
   "ddgs>=9,<10",
+  "langchain-core>=0.3,<1",
+  "langchain-openai>=0.2,<1",
+  "python-multipart>=0.0.20,<1",
+  "pymupdf>=1.26,<2",
+  "rapidocr>=3.9,<4",
+  "onnxruntime>=1.22,<2",
+  "omegaconf>=2.3,<3",
 ]
 
 [project.optional-dependencies]
-embeddings = ["sentence-transformers>=5,<6"]
+embeddings = [
+  "sentence-transformers>=5,<6",
+  "langchain-huggingface>=0.1,<1",
+]
 dev = [
   "pytest>=8.4,<9",
   "pytest-asyncio>=1,<2",
@@ -34,6 +45,8 @@ packages = ["app"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+# Windows 下系统临时目录（pytest-of-<user>）可能被 ACL 拒绝，改用项目内临时目录。
+addopts = "--basetemp=.pytest_tmp"
 
 [tool.ruff]
 line-length = 110
@@ -49,5 +62,10 @@ plugins = ["pydantic.mypy"]
 
 [[tool.mypy.overrides]]
 module = ["sentence_transformers", "sentence_transformers.*"]
+ignore_missing_imports = true
+follow_imports = "skip"
+
+[[tool.mypy.overrides]]
+module = ["langchain.*", "langchain_core.*", "langchain_openai.*", "langchain_huggingface.*"]
 ignore_missing_imports = true
 follow_imports = "skip"

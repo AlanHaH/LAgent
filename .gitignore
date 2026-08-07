@@ -10,8 +10,12 @@ backend/target/
 frontend/node_modules/
 frontend/dist/
 frontend/*.tsbuildinfo
+frontend/playwright-report/
+frontend/test-results/
+frontend/.playwright/
 ai-service/.venv/
 ai-service/.pytest_cache/
+ai-service/.pytest_tmp/
 ai-service/.ruff_cache/
 ai-service/.mypy_cache/
 ai-service/**/__pycache__/
@@ -20,3 +24,24 @@ ai-service/data/
 data/
 uploads/
 .workbuddy/
+weread-mcp/.venv/
+weread-mcp/data/
+weread-mcp/.pytest_tmp/
+weread-mcp/**/__pycache__/
+
+# Python 缓存（根目录 & 通用）
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+__pycache__/
+*.pyc
+
+# Playwright CLI 下载缓存
+.playwright-cli/
+
+# 第三方版权资料与临时截图
+learning-material/*.pdf
+frontend/assessments.png
+
+# 毕业论文交付物
+毕业论文/

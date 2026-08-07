@@ -14,6 +14,7 @@ public class LearningGoalEntity extends BaseEntity {
     private String publicId;
     private Long userId;
     private Long directionId;
+    private String customDirection;
     private Long sourceGoalId;
     private String sourceType;
     private Long profileVersionId;

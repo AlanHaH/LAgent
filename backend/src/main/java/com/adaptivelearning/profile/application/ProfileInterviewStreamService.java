@@ -79,6 +79,7 @@ public class ProfileInterviewStreamService {
     private static String aiMessage(ErrorCode code) {
         return switch (code) {
             case SERVICE_TEMPORARILY_UNAVAILABLE -> "AI 服务未启动或暂不可用，请启动 AI 服务后重试";
+            case MODEL_OUTPUT_INVALID -> "AI 返回内容格式异常，系统自动修复失败，请重新发送本条消息";
             case MODEL_PROVIDER_ERROR -> "AI 模型服务返回错误，请稍后重试";
             case MODEL_REQUEST_TIMEOUT -> "AI 模型服务响应超时，请稍后重试";
             case MODEL_QUOTA_EXCEEDED -> "AI 模型调用额度已用尽";

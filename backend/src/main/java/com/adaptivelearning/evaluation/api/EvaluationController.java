@@ -20,7 +20,7 @@ public class EvaluationController {
     private final AssessmentService assessments;
     private final AnalyticsService analytics;
 
-    public record QuestionRequest(@NotBlank String type, @NotBlank @Size(max = 4000) String stem, List<String> options,
+    public record QuestionRequest(@NotBlank @Pattern(regexp = "SINGLE_CHOICE|MULTIPLE_CHOICE|TRUE_FALSE|FILL_BLANK|SHORT_ANSWER|ESSAY") String type, @NotBlank @Size(max = 4000) String stem, List<String> options,
                                   @NotNull Object answer, Map<String, Object> rubric, @Size(max = 4000) String analysis,
                                   @Min(1) @Max(5) int difficulty, @NotEmpty List<Long> knowledgePointIds) {
     }
@@ -43,6 +43,8 @@ public class EvaluationController {
 
     public record AppealRequest(@NotBlank @Size(max = 2000) String reason, Object evidence) {
     }
+
+    public record CorrectionRequest(@NotBlank @Pattern(regexp = "CONCEPT_UNCLEAR|CARELESS|METHOD_WRONG|KNOWLEDGE_GAP|MISREAD|OTHER") String reasonCode) { }
 
     public record ReportRequest(@NotBlank String type, @NotNull LocalDate periodStart, @NotNull LocalDate periodEnd) {
     }
@@ -98,8 +100,15 @@ public class EvaluationController {
     }
 
     @PostMapping("/attempts/{id}/submission")
+    @ResponseStatus(HttpStatus.ACCEPTED)
     public ApiResponse<AssessmentAttemptEntity> submit(@PathVariable String id, @RequestHeader("Idempotency-Key") String key) {
         return ApiResponse.ok(assessments.submit(id, key));
+    }
+
+    @PostMapping("/attempts/{id}/grading-retry")
+    @ResponseStatus(HttpStatus.ACCEPTED)
+    public ApiResponse<AssessmentAttemptEntity> retryGrading(@PathVariable String id) {
+        return ApiResponse.ok(assessments.retryGrading(id));
     }
 
     @GetMapping("/attempts/{id}/result")
@@ -113,9 +122,26 @@ public class EvaluationController {
         return ApiResponse.ok(null);
     }
 
+    @GetMapping("/assessment-appeals")
+    public ApiResponse<List<Map<String,Object>>> appeals() {
+        return ApiResponse.ok(assessments.appeals());
+    }
+
+    @PostMapping("/assessment-appeals/{id}/withdrawal")
+    public ApiResponse<Void> withdrawAppeal(@PathVariable String id) {
+        assessments.withdrawAppeal(id);
+        return ApiResponse.ok(null);
+    }
+
     @GetMapping("/wrong-questions")
     public ApiResponse<List<WrongQuestionEntity>> wrong() {
         return ApiResponse.ok(assessments.wrongQuestions());
+    }
+
+    @PostMapping("/wrong-questions/{id}/correction")
+    public ApiResponse<WrongQuestionEntity> correctWrong(@PathVariable long id,
+                                                          @Valid @RequestBody CorrectionRequest request) {
+        return ApiResponse.ok(assessments.correctWrong(id, request.reasonCode()));
     }
 
     @GetMapping("/mastery")
@@ -140,7 +166,7 @@ public class EvaluationController {
 
     @GetMapping("/analytics/mastery-trend")
     public ApiResponse<List<Map<String, Object>>> masteryTrend() {
-        return ApiResponse.ok(analytics.mastery());
+        return ApiResponse.ok(analytics.masteryTrend());
     }
 
     @GetMapping("/reports")

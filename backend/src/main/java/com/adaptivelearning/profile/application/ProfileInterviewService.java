@@ -46,7 +46,12 @@ public class ProfileInterviewService {
     public record SessionView(String id, String status, Draft draft, List<String> missingFields,
                               int completenessPercent, boolean readyToConfirm, String assistantMode,
                               int version, List<MessageView> messages) {}
-    public record ConfirmationView(String sessionId, String status, ProfileService.ProfileView profile) {}
+    public record ConfirmationView(String sessionId, String status, ProfileService.ProfileView profile,
+                                   ProfileGenerationJobEntity generationJob) {}
+    public record ManualSaveView(ProfileService.ProfileView profile,
+                                 List<AvailabilityPolicy.NormalizedSlot> availability,
+                                 ProfileGenerationJobEntity generationJob,
+                                 SessionView interview) {}
 
     @Transactional
     public SessionView start(boolean restart) {
@@ -179,7 +184,7 @@ public class ProfileInterviewService {
                 pref.difficultyMax(), pref.reminders(), preferenceVersion));
         profileService.saveAvailability(draft.availability().stream().map(s -> new AvailabilityPolicy.Slot(
                 s.weekday(), s.start(), s.end(), s.energyLevel())).toList());
-        profileService.generate();
+        ProfileGenerationJobEntity generationJob = profileService.generate("INTERVIEW_CONFIRM");
 
         session.setStatus("CONFIRMED");
         session.setConfirmedAt(Instant.now());
@@ -188,7 +193,52 @@ public class ProfileInterviewService {
         if (sessionMapper.updateById(session) != 1) conflict();
         audit.record("PROFILE_INTERVIEW_CONFIRM", "PROFILE_INTERVIEW", publicId, null,
                 "profileVersion=" + saved.version() + ",periodDays=" + days, "SUCCESS");
-        return new ConfirmationView(publicId, "CONFIRMED", profileService.get());
+        return new ConfirmationView(publicId, "CONFIRMED", profileService.get(), generationJob);
+    }
+
+    @Transactional
+    public ManualSaveView saveManual(String sessionId, int sessionVersion,
+                                     ProfileService.ProfileInput profile,
+                                     ProfileService.PreferenceInput preference,
+                                     List<AvailabilityPolicy.Slot> availability) {
+        ProfileInterviewSessionEntity current = requireSession(sessionId, false);
+        if ("ACTIVE".equals(current.getStatus())) requireVersion(current, sessionVersion);
+
+        profileService.save(profile);
+        profileService.savePreference(preference);
+        List<AvailabilityPolicy.NormalizedSlot> normalized = profileService.saveAvailability(availability);
+        ProfileGenerationJobEntity job = profileService.generate("MANUAL_SAVE");
+
+        long userId = SecurityUtils.currentUserId();
+        Draft synchronizedDraft = seedDraft(userId);
+        ProfileInterviewSessionEntity synchronizedSession;
+        if ("ACTIVE".equals(current.getStatus())) {
+            synchronizedSession = current;
+        } else {
+            synchronizedSession = new ProfileInterviewSessionEntity();
+            synchronizedSession.setPublicId(UUID.randomUUID().toString());
+            synchronizedSession.setUserId(userId);
+        }
+        synchronizedSession.setStatus("CONFIRMED");
+        synchronizedSession.setConfirmedAt(Instant.now());
+        synchronizedSession.setDraftJson(toJson(synchronizedDraft));
+        synchronizedSession.setMissingFieldsJson("[]");
+        synchronizedSession.setCompletenessPercent(100);
+        synchronizedSession.setAssistantMode("MANUAL");
+        if (synchronizedSession.getId() == null) {
+            sessionMapper.insert(synchronizedSession);
+        } else if (sessionMapper.updateById(synchronizedSession) != 1) {
+            conflict();
+        }
+        int next = nextSequence(synchronizedSession.getId());
+        insertMessage(synchronizedSession, next, "ASSISTANT",
+                "高级手动编辑已经校验并保存，右侧草稿已同步为本次正式画像。若还要调整，可以重新开始访谈。",
+                "MANUAL");
+        ProfileService.ProfileView finalProfile = profileService.get();
+        audit.record("PROFILE_MANUAL_SAVE", "PROFILE_INTERVIEW", synchronizedSession.getPublicId(), null,
+                "profileVersion=" + finalProfile.currentVersionNo()
+                        + ",periodDays=" + finalProfile.planPeriodDays(), "SUCCESS");
+        return new ManualSaveView(finalProfile, normalized, job, view(synchronizedSession));
     }
 
     private Draft seedDraft(long userId) {

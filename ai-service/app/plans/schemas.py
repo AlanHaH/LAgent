@@ -23,9 +23,17 @@ class PlanRecommendationRequest(BaseModel):
     plan_start_date: date = Field(alias="planStartDate")
     plan_end_date: date = Field(alias="planEndDate")
     background_text: str | None = Field(default=None, alias="backgroundText", max_length=2000)
-    knowledge_points: list[PlanKnowledgePoint] = Field(default_factory=list, alias="knowledgePoints", max_length=50)
+    knowledge_points: list[PlanKnowledgePoint] = Field(
+        default_factory=list, alias="knowledgePoints", max_length=50
+    )
+    allowed_space_ids: list[int] = Field(default_factory=list, alias="allowedSpaceIds", max_length=20)
+    allowed_document_version_ids: list[int] = Field(
+        default_factory=list, alias="allowedDocumentVersionIds", max_length=500
+    )
+    knowledge_top_k: int = Field(default=12, alias="knowledgeTopK", ge=3, le=20)
     user_requirement: str | None = Field(default=None, alias="userRequirement", max_length=1000)
     weekly_available_minutes: int = Field(alias="weeklyAvailableMinutes", ge=10, le=10080)
+    exploration_mode: bool = Field(default=False, alias="explorationMode")
     count: int = Field(default=6, ge=2, le=10)
 
     @model_validator(mode="after")
@@ -42,7 +50,12 @@ class PlanTaskItem(BaseModel):
     task_type: Literal["LEARNING", "PRACTICE", "REVIEW", "ASSESSMENT"] = Field(alias="taskType")
     priority: Literal["LOW", "MEDIUM", "HIGH", "URGENT"] = "MEDIUM"
     estimated_minutes: int = Field(alias="estimatedMinutes", ge=15, le=180)
-    knowledge_point_ids: list[int | str] = Field(default_factory=list, alias="knowledgePointIds", max_length=10)
+    knowledge_point_ids: list[int | str] = Field(
+        default_factory=list, alias="knowledgePointIds", max_length=10
+    )
+    source_chunk_ids: list[int] = Field(default_factory=list, alias="sourceChunkIds", max_length=12)
+    learning_objective: str = Field(alias="learningObjective", min_length=2, max_length=1000)
+    source_queries: list[str] = Field(default_factory=list, alias="sourceQueries", max_length=8)
     acceptance_criteria: list[str] = Field(alias="acceptanceCriteria", min_length=1, max_length=5)
     reason: str = Field(min_length=5, max_length=500)
 

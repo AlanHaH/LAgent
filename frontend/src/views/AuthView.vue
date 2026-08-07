@@ -112,7 +112,8 @@ async function submit() {
     if (mode.value === 'login') {
       await auth.login(form.login.trim(), form.password)
       const redirect = typeof route.query.redirect === 'string' && route.query.redirect.startsWith('/')
-        ? route.query.redirect : '/dashboard'
+        ? route.query.redirect
+        : auth.isAdmin ? '/admin' : '/dashboard'
       await router.replace(redirect)
     } else if (mode.value === 'register') {
       await auth.register(form.username.trim(), form.email.trim(), form.password, form.verificationCode)

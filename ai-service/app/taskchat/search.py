@@ -25,7 +25,10 @@ class WebSearcher:
 
     async def search(self, query: str) -> list[WebResult]:
         try:
-            return await asyncio.wait_for(asyncio.to_thread(self._search_sync, query), timeout=self._timeout + 3)
+            return await asyncio.wait_for(
+                asyncio.to_thread(self._search_sync, query),
+                timeout=self._timeout + 3,
+            )
         except ServiceError:
             raise
         except Exception as error:  # noqa: BLE001 - 搜索失败统一映射为服务不可用
@@ -36,7 +39,7 @@ class WebSearcher:
         from ddgs import DDGS
 
         results: list[WebResult] = []
-        with DDGS(timeout=self._timeout) as client:
+        with DDGS(timeout=max(1, round(self._timeout))) as client:
             for item in client.text(query, max_results=self._max_results):
                 url = str(item.get("href", "")).strip()
                 if not url.startswith("http"):

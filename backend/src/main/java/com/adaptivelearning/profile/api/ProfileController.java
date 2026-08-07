@@ -53,6 +53,10 @@ public class ProfileController {
     public record InterviewStartRequest(Boolean restart) {}
     public record InterviewMessageRequest(@NotBlank @Size(max=2000) String content, @NotNull Integer version) {}
     public record InterviewConfirmRequest(@NotNull Integer version) {}
+    public record ManualSaveRequest(@NotBlank String interviewSessionId, @NotNull Integer interviewVersion,
+                                    @NotNull @Valid ProfileRequest profile,
+                                    @NotNull @Valid PreferenceRequest preference,
+                                    @NotNull @Valid AvailabilityRequest availability) {}
 
     @GetMapping public ApiResponse<ProfileService.ProfileView> get() { return ApiResponse.ok(service.get()); }
 
@@ -92,6 +96,24 @@ public class ProfileController {
         return ApiResponse.ok(interviewService.confirm(sessionId, request.version()));
     }
 
+    @PostMapping("/manual-save")
+    public ApiResponse<ProfileInterviewService.ManualSaveView> manualSave(
+            @Valid @RequestBody ManualSaveRequest r) {
+        ProfileRequest p = r.profile();
+        PreferenceRequest pref = r.preference();
+        return ApiResponse.ok(interviewService.saveManual(r.interviewSessionId(), r.interviewVersion(),
+                new ProfileService.ProfileInput(p.timezone(), p.weekStart(), p.planPeriodDays(),
+                        p.planStartDate(), p.planEndDate(), p.backgroundText(),
+                        p.directions().stream().map(d -> new ProfileService.DirectionInput(
+                                d.directionId(), d.customDirection(), d.currentStage(), d.primary())).toList(),
+                        p.version()),
+                new ProfileService.PreferenceInput(pref.contentModes(), pref.guidanceStyle(),
+                        pref.taskGranularity(), pref.focusMinutes(), pref.capacityRatio(),
+                        pref.difficultyMin(), pref.difficultyMax(), pref.reminders(), pref.version()),
+                r.availability().slots().stream().map(s -> new AvailabilityPolicy.Slot(
+                        s.weekday(), s.start(), s.end(), s.energyLevel())).toList()));
+    }
+
     @PutMapping public ApiResponse<ProfileService.ProfileView> save(@Valid @RequestBody ProfileRequest r) {
         return ApiResponse.ok(service.save(new ProfileService.ProfileInput(r.timezone(), r.weekStart(), r.planPeriodDays(),
                 r.planStartDate(), r.planEndDate(), r.backgroundText(),
@@ -117,6 +139,11 @@ public class ProfileController {
     @PostMapping("/self-assessments") @ResponseStatus(HttpStatus.CREATED)
     public ApiResponse<SelfAssessmentEntity> selfAssessment(@Valid @RequestBody SelfAssessmentRequest r) {
         return ApiResponse.ok(service.addSelfAssessment(r.knowledgePointId(), r.level(), r.lastStudiedAt(), r.note()));
+    }
+
+    @GetMapping("/self-assessments")
+    public ApiResponse<List<SelfAssessmentEntity>> selfAssessments() {
+        return ApiResponse.ok(service.selfAssessments());
     }
 
     @GetMapping("/versions") public ApiResponse<List<ProfileVersionEntity>> versions() { return ApiResponse.ok(service.versions()); }

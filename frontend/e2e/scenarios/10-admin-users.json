@@ -1,0 +1,72 @@
+{
+  "name": "管理员用户学习档案",
+  "description": "管理员登录，进入用户与权限，搜索学生并打开学习档案",
+  "tags": ["@admin", "@users"],
+  "requirements": ["APP_ADMIN_PASSWORD"],
+  "captureEachStep": true,
+  "steps": [
+    {
+      "name": "管理员可视化登录",
+      "action": "login",
+      "login": "${APP_ADMIN_USERNAME}",
+      "password": "${APP_ADMIN_PASSWORD}",
+      "mode": "ui",
+      "destination": "/admin"
+    },
+    {
+      "name": "管理中心加载完成",
+      "action": "expect",
+      "assertion": "visible",
+      "target": { "text": "系统治理中心", "exact": true }
+    },
+    {
+      "name": "在总览展开全部活动目标",
+      "action": "click",
+      "target": { "testId": "admin-metric-active-goals" }
+    },
+    {
+      "name": "活动目标列表留在总览显示",
+      "action": "expect",
+      "assertion": "visible",
+      "target": { "testId": "admin-active-goals-panel" }
+    },
+    {
+      "name": "收起活动目标列表",
+      "action": "click",
+      "target": { "role": "button", "name": "收起", "exact": true }
+    },
+    {
+      "name": "从总览用户卡进入用户与权限",
+      "action": "click",
+      "target": { "testId": "admin-metric-users" }
+    },
+    {
+      "name": "搜索现有学生",
+      "action": "fill",
+      "target": { "placeholder": "搜索用户名或邮箱", "exact": true },
+      "value": "Alan"
+    },
+    {
+      "name": "执行用户查询",
+      "action": "click",
+      "target": { "role": "button", "name": "查询", "exact": true }
+    },
+    {
+      "name": "学生账号显示在列表",
+      "action": "expect",
+      "assertion": "visible",
+      "target": { "text": "Alan", "exact": true }
+    },
+    {
+      "name": "打开学生学习档案",
+      "action": "click",
+      "target": { "role": "button", "name": "学习档案", "exact": true }
+    },
+    {
+      "name": "学习档案对话框可见",
+      "action": "expect",
+      "assertion": "visible",
+      "target": { "text": "Alan 的学习档案", "exact": true }
+    }
+  ]
+}

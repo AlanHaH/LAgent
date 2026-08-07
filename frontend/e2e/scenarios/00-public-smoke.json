@@ -1,0 +1,44 @@
+{
+  "name": "公共页面与服务冒烟测试",
+  "description": "验证首页、登录页和后端健康接口能够正常访问",
+  "tags": ["@smoke", "@public", "@mobile"],
+  "captureEachStep": true,
+  "steps": [
+    {
+      "name": "打开产品首页",
+      "action": "goto",
+      "path": "/"
+    },
+    {
+      "name": "首页品牌正确显示",
+      "action": "expect",
+      "assertion": "containsText",
+      "target": { "css": "body" },
+      "value": "知序"
+    },
+    {
+      "name": "检查后端 API 健康状态",
+      "action": "api",
+      "method": "GET",
+      "path": "/system/health",
+      "expectedStatus": 200
+    },
+    {
+      "name": "打开登录页",
+      "action": "goto",
+      "path": "/login"
+    },
+    {
+      "name": "登录账号输入框可见",
+      "action": "expect",
+      "assertion": "visible",
+      "target": { "placeholder": "用户名或注册邮箱", "exact": true }
+    },
+    {
+      "name": "登录按钮可用",
+      "action": "expect",
+      "assertion": "enabled",
+      "target": { "role": "button", "name": "登录", "exact": true }
+    }
+  ]
+}

@@ -69,6 +69,12 @@ CREATE TABLE model_run (
  model_config_id BIGINT,prompt_version VARCHAR(40) NOT NULL,status VARCHAR(24) NOT NULL,input_ref_json JSON NOT NULL,
  output_hash VARCHAR(64),token_in INT,token_out INT,latency_ms BIGINT,error_code VARCHAR(80),created_at TIMESTAMP NOT NULL
 );
+CREATE TABLE prompt_template (
+ id BIGINT PRIMARY KEY,public_id VARCHAR(64) NOT NULL UNIQUE,code VARCHAR(100) NOT NULL,
+ version_no INT NOT NULL,content VARCHAR(16000) NOT NULL,schema_json JSON,
+ status VARCHAR(24) NOT NULL,created_at TIMESTAMP NOT NULL,created_by BIGINT NOT NULL,
+ UNIQUE(public_id),UNIQUE(code,version_no)
+);
 INSERT INTO sys_role(id,code,name,status) VALUES(1,'STUDENT','学生','ACTIVE'),(2,'ADMIN','管理员','ACTIVE');
 INSERT INTO learning_direction(id,code,name,status,sort_no,version) VALUES
 (10,'COMPUTER_SCIENCE','计算机科学','ACTIVE',10,0),

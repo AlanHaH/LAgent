@@ -19,15 +19,11 @@ public class CatalogController {
 
     @GetMapping("/learning-directions")
     public ApiResponse<List<Map<String, Object>>> directions() {
-        return ApiResponse.ok(service.directions());
+        return ApiResponse.ok(service.catalogDirections());
     }
 
     @GetMapping("/knowledge-points")
     public ApiResponse<List<Map<String, Object>>> knowledgePoints(@RequestParam(required = false) Long directionId) {
-        List<Map<String, Object>> items = service.knowledgePoints();
-        if (directionId != null) {
-            items = items.stream().filter(item -> directionId.equals(((Number) item.get("direction_id")).longValue())).toList();
-        }
-        return ApiResponse.ok(items);
+        return ApiResponse.ok(service.knowledgePoints(directionId, null));
     }
 }

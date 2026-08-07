@@ -47,6 +47,7 @@ class RagRetrievalService:
             query_vector,
             user_id=request.user_id,
             allowed_space_ids=request.allowed_space_ids,
+            allowed_document_ids=request.allowed_document_ids,
             allowed_document_version_ids=request.allowed_document_version_ids,
             limit=request.candidate_k,
         )
@@ -143,5 +144,5 @@ class RagRetrievalService:
             title_path=list(payload.get("titlePath") or []),
             page_from=payload.get("pageFrom"),
             page_to=payload.get("pageTo"),
-            quote_preview=text[:500],
+            quote_preview=text[:4000],
         )

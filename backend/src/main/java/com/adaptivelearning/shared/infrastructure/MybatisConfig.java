@@ -35,8 +35,10 @@ public class MybatisConfig {
 
             @Override
             public void updateFill(MetaObject metaObject) {
-                strictUpdateFill(metaObject, "updatedAt", Instant.class, Instant.now());
-                strictUpdateFill(metaObject, "updatedBy", Long.class, SecurityUtils.currentUserIdOrSystem());
+                // 不能用 strictUpdateFill：它只在实体字段为 null 时填充，而乐观锁更新
+                // 加载的实体带着旧值，导致 updatedAt/updatedBy 永远停留在插入时刻。
+                setFieldValByName("updatedAt", Instant.now(), metaObject);
+                setFieldValByName("updatedBy", SecurityUtils.currentUserIdOrSystem(), metaObject);
             }
         };
     }

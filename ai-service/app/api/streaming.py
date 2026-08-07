@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import Any
 
@@ -9,6 +10,7 @@ from app.core.sse import encode_sse
 
 EventQueue = asyncio.Queue[tuple[str, dict[str, Any]] | None]
 Worker = Callable[[EventQueue], Awaitable[None]]
+logger = logging.getLogger(__name__)
 
 
 async def event_stream(started: dict[str, Any], worker: Worker) -> AsyncIterator[bytes]:
@@ -18,6 +20,12 @@ async def event_stream(started: dict[str, Any], worker: Worker) -> AsyncIterator
         try:
             await worker(queue)
         except ServiceError as error:
+            logger.warning(
+                "stream_failed code=%s retryable=%s details=%s",
+                error.code,
+                error.retryable,
+                error.details,
+            )
             await queue.put(
                 (
                     "message.failed",
@@ -31,7 +39,8 @@ async def event_stream(started: dict[str, Any], worker: Worker) -> AsyncIterator
             )
         except asyncio.CancelledError:
             raise
-        except Exception:
+        except Exception as error:
+            logger.exception("stream_internal_error exception=%s", type(error).__name__)
             await queue.put(
                 (
                     "message.failed",

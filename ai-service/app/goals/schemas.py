@@ -46,15 +46,14 @@ class GoalRecommendationRequest(BaseModel):
     def validate_context(self) -> GoalRecommendationRequest:
         if self.plan_end_date < self.plan_start_date:
             raise ValueError("planEndDate cannot precede planStartDate")
-        if not any(item.id is not None for item in self.directions):
-            raise ValueError("at least one catalog direction is required")
         return self
 
 
 class GoalRecommendationItem(BaseModel):
     model_config = ConfigDict(extra="ignore", populate_by_name=True)
 
-    direction_id: int = Field(alias="directionId", gt=0)
+    direction_id: int | None = Field(default=None, alias="directionId", gt=0)
+    custom_direction: str | None = Field(default=None, alias="customDirection", min_length=1, max_length=120)
     name: str = Field(min_length=2, max_length=100)
     type: Literal["SKILL", "EXAM", "PROJECT"]
     description: str = Field(min_length=10, max_length=1200)
@@ -64,6 +63,12 @@ class GoalRecommendationItem(BaseModel):
     success_criteria: list[str] = Field(alias="successCriteria", min_length=2, max_length=5)
     reason: str = Field(min_length=5, max_length=500)
     milestones: list[str] = Field(min_length=2, max_length=5)
+
+    @model_validator(mode="after")
+    def validate_direction(self) -> GoalRecommendationItem:
+        if (self.direction_id is None) == (not self.custom_direction):
+            raise ValueError("exactly one of directionId or customDirection is required")
+        return self
 
 
 class GoalRecommendationModelOutput(BaseModel):

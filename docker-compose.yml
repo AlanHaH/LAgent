@@ -12,6 +12,7 @@ services:
       TZ: UTC
     command: ["--character-set-server=utf8mb4", "--collation-server=utf8mb4_0900_ai_ci", "--default-time-zone=+00:00"]
     volumes: ["mysql-data:/var/lib/mysql"]
+    ports: ["3306:3306"]
     healthcheck:
       test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -u root -p$$MYSQL_ROOT_PASSWORD --silent"]
       interval: 10s
@@ -23,6 +24,7 @@ services:
     restart: unless-stopped
     command: ["redis-server", "--appendonly", "yes", "--maxmemory-policy", "noeviction"]
     volumes: ["redis-data:/data"]
+    ports: ["6379:6379"]
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
@@ -32,7 +34,10 @@ services:
   qdrant:
     image: qdrant/qdrant:v1.15.4
     restart: unless-stopped
+    environment:
+      QDRANT__SERVICE__API_KEY: ${QDRANT_API_KEY:?set QDRANT_API_KEY in .env}
     volumes: ["qdrant-data:/qdrant/storage"]
+    ports: ["6333:6333"]
 
   ai-service:
     build: ./ai-service
@@ -46,16 +51,26 @@ services:
       AI_MODEL_NAME: ${MODEL_NAME:-}
       AI_MODEL_MAX_OUTPUT_TOKENS: ${MODEL_MAX_OUTPUT_TOKENS:-1200}
       AI_MODEL_THINKING: ${MODEL_THINKING:-disabled}
+      AI_MODEL_TIMEOUT_SECONDS: ${MODEL_TIMEOUT_SECONDS:-120}
       AI_EMBEDDING_PROVIDER: ${AI_EMBEDDING_PROVIDER:-sentence_transformers}
       AI_EMBEDDING_MODEL: ${AI_EMBEDDING_MODEL:-BAAI/bge-small-zh-v1.5}
       AI_EMBEDDING_DEVICE: ${AI_EMBEDDING_DEVICE:-cpu}
       AI_ALLOW_HASH_FALLBACK: ${AI_ALLOW_HASH_FALLBACK:-true}
+      AI_OCR_ENABLED: ${AI_OCR_ENABLED:-true}
+      AI_OCR_MAX_FILE_MB: ${AI_OCR_MAX_FILE_MB:-50}
+      AI_OCR_MAX_PAGES: ${AI_OCR_MAX_PAGES:-100}
+      AI_OCR_DPI: ${AI_OCR_DPI:-180}
       AI_QDRANT_MODE: server
       AI_QDRANT_URL: http://qdrant:6333
+      AI_QDRANT_API_KEY: ${QDRANT_API_KEY:?set QDRANT_API_KEY in .env}
+      AI_WEREAD_MCP_ENABLED: "true"
+      AI_WEREAD_MCP_URL: http://weread-mcp:8091/mcp
+      AI_WEREAD_MCP_FAKE: ${WEREAD_MCP_FAKE:-false}
       AI_EXPOSE_DOCS: "false"
     volumes: ["embedding-cache:/home/aiuser/.cache"]
     depends_on:
       qdrant: { condition: service_started }
+      weread-mcp: { condition: service_started }
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8090/health/live', timeout=3)"]
       interval: 15s
@@ -85,11 +100,19 @@ services:
       MAIL_STARTTLS_ENABLED: ${MAIL_STARTTLS_ENABLED:-true}
       MAIL_SSL_ENABLED: ${MAIL_SSL_ENABLED:-false}
       CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-http://localhost:8088,http://127.0.0.1:8088}
+      MODEL_BASE_URL: ${MODEL_BASE_URL:-}
+      MODEL_API_KEY: ${MODEL_API_KEY:-}
+      MODEL_SECRET_ENCRYPTION_KEY: ${MODEL_SECRET_ENCRYPTION_KEY:-${JWT_SECRET}}
       MODEL_NAME: ${MODEL_NAME:-}
       AI_SERVICE_ENABLED: ${AI_SERVICE_ENABLED:-true}
       AI_SERVICE_BASE_URL: http://ai-service:8090
       AI_INTERNAL_TOKEN: ${AI_INTERNAL_TOKEN:?set AI_INTERNAL_TOKEN in .env}
       AI_SERVICE_TIMEOUT: ${AI_SERVICE_TIMEOUT:-PT65S}
+      TASK_CHAT_HISTORY_MAX_MESSAGES: ${TASK_CHAT_HISTORY_MAX_MESSAGES:-400}
+      TASK_CHAT_HISTORY_MAX_CHARACTERS: ${TASK_CHAT_HISTORY_MAX_CHARACTERS:-600000}
+      CLAMAV_HOST: ${CLAMAV_HOST:-}
+      CLAMAV_PORT: ${CLAMAV_PORT:-3310}
+      ANTIVIRUS_REQUIRED: ${ANTIVIRUS_REQUIRED:-false}
     volumes: ["object-data:/app/data"]
     depends_on:
       mysql: { condition: service_healthy }
@@ -100,6 +123,17 @@ services:
       interval: 15s
       timeout: 5s
       retries: 12
+
+  weread-mcp:
+    build: ./weread-mcp
+    restart: unless-stopped
+    environment:
+      WEREAD_MCP_HOST: 0.0.0.0
+      WEREAD_MCP_PORT: "8091"
+      WEREAD_MCP_FAKE: ${WEREAD_MCP_FAKE:-false}
+      WEREAD_MCP_CREDENTIALS_PATH: /app/data/credentials.json
+    volumes: ["weread-data:/app/data"]
+    ports: ["8091:8091"]
 
   frontend:
     build: ./frontend
@@ -114,3 +148,4 @@ volumes:
   object-data:
   qdrant-data:
   embedding-cache:
+  weread-data:

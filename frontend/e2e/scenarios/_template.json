@@ -1,0 +1,50 @@
+{
+  "name": "复制后填写业务名称",
+  "description": "以下步骤展示通用动作；文件名去掉开头下划线后会被自动加载",
+  "enabled": false,
+  "tags": ["@business"],
+  "requirements": ["TEST_STUDENT_LOGIN", "TEST_STUDENT_PASSWORD"],
+  "variables": {
+    "EXAMPLE_NAME": "自动化-${RUN_ID}"
+  },
+  "captureEachStep": true,
+  "steps": [
+    {
+      "name": "通过接口快速登录学生账号",
+      "action": "login",
+      "login": "${TEST_STUDENT_LOGIN}",
+      "password": "${TEST_STUDENT_PASSWORD}",
+      "mode": "api",
+      "destination": "/dashboard"
+    },
+    {
+      "name": "进入待测页面",
+      "action": "goto",
+      "path": "/goals"
+    },
+    {
+      "name": "点击业务按钮",
+      "action": "click",
+      "target": { "role": "button", "name": "新建目标" }
+    },
+    {
+      "name": "填写业务字段",
+      "action": "fill",
+      "target": { "label": "名称" },
+      "value": "${EXAMPLE_NAME}"
+    },
+    {
+      "name": "验证页面结果",
+      "action": "expect",
+      "assertion": "containsText",
+      "target": { "css": "body" },
+      "value": "${EXAMPLE_NAME}"
+    },
+    {
+      "name": "保存页面证据",
+      "action": "screenshot",
+      "filename": "业务结果.png",
+      "fullPage": true
+    }
+  ]
+}

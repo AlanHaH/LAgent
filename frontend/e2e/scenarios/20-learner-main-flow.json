@@ -1,0 +1,105 @@
+{
+  "name": "学习者主链路冒烟测试",
+  "description": "使用真实学生账号贯穿画像、目标、计划、任务图谱和评估页面，并校验关键接口可访问",
+  "tags": ["@learner", "@main-flow"],
+  "requirements": ["TEST_STUDENT_LOGIN", "TEST_STUDENT_PASSWORD"],
+  "captureEachStep": true,
+  "steps": [
+    {
+      "name": "通过接口登录学生账号",
+      "action": "login",
+      "login": "${TEST_STUDENT_LOGIN}",
+      "password": "${TEST_STUDENT_PASSWORD}",
+      "mode": "api",
+      "destination": "/dashboard"
+    },
+    {
+      "name": "学习画像接口可访问",
+      "action": "api",
+      "method": "GET",
+      "path": "/profiles/me",
+      "expectedStatus": 200
+    },
+    {
+      "name": "打开学习画像",
+      "action": "goto",
+      "path": "/onboarding"
+    },
+    {
+      "name": "画像访谈工作区可见",
+      "action": "expect",
+      "assertion": "containsText",
+      "target": { "css": "body" },
+      "value": "画像"
+    },
+    {
+      "name": "目标列表接口可访问",
+      "action": "api",
+      "method": "GET",
+      "path": "/goals?pageSize=100",
+      "expectedStatus": 200
+    },
+    {
+      "name": "打开目标与项目",
+      "action": "goto",
+      "path": "/goals"
+    },
+    {
+      "name": "目标入口可见",
+      "action": "expect",
+      "assertion": "containsText",
+      "target": { "css": "body" },
+      "value": "目标"
+    },
+    {
+      "name": "打开 Agent 计划",
+      "action": "goto",
+      "path": "/plans"
+    },
+    {
+      "name": "计划确认边界可见",
+      "action": "expect",
+      "assertion": "containsText",
+      "target": { "css": "body" },
+      "value": "Agent"
+    },
+    {
+      "name": "任务图谱接口可访问",
+      "action": "api",
+      "method": "GET",
+      "path": "/tasks/graph",
+      "expectedStatus": 200
+    },
+    {
+      "name": "打开任务图谱",
+      "action": "goto",
+      "path": "/today"
+    },
+    {
+      "name": "任务图谱页面可见",
+      "action": "expect",
+      "assertion": "containsText",
+      "target": { "css": "body" },
+      "value": "学习路径"
+    },
+    {
+      "name": "评估列表接口可访问",
+      "action": "api",
+      "method": "GET",
+      "path": "/assessments?pageSize=100",
+      "expectedStatus": 200
+    },
+    {
+      "name": "打开评估与错题",
+      "action": "goto",
+      "path": "/assessments"
+    },
+    {
+      "name": "评估闭环页面可见",
+      "action": "expect",
+      "assertion": "containsText",
+      "target": { "css": "body" },
+      "value": "评估"
+    }
+  ]
+}

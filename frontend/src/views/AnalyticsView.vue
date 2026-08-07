@@ -36,6 +36,12 @@ type AnalyticsOverview = {
   mastery: MasterySnapshot[]
 }
 
+type MasteryTrendSnapshot = {
+  snapshotAt: string
+  mastery: MasterySnapshot[]
+  calcVersion: string
+}
+
 type StudyReport = {
   publicId: string
   type: string
@@ -54,6 +60,7 @@ const range = ref<[string, string]>([
   dayjs().format('YYYY-MM-DD'),
 ])
 const overview = ref<AnalyticsOverview>({ metrics: {}, studyTime: [], mastery: [] })
+const masteryTrend = ref<MasteryTrendSnapshot[]>([])
 const reports = ref<StudyReport[]>([])
 const loading = ref(false)
 const generating = ref(false)
@@ -92,6 +99,27 @@ const chart = computed(() => ({
     },
   ],
 }))
+
+const masteryTrendChart = computed(() => {
+  const names = [...new Set(masteryTrend.value.flatMap((snapshot) => snapshot.mastery.map((item) => item.name)))].slice(0, 8)
+  return {
+    tooltip: { trigger: 'axis' },
+    legend: { data: names, bottom: 0 },
+    grid: { left: 42, right: 18, top: 25, bottom: 52 },
+    xAxis: { type: 'category', data: masteryTrend.value.map((snapshot) => dayjs(snapshot.snapshotAt).format('M/D HH:mm')) },
+    yAxis: { type: 'value', min: 0, max: 100, axisLabel: { formatter: '{value}%' } },
+    series: names.map((name) => ({
+      name,
+      type: 'line',
+      smooth: true,
+      connectNulls: true,
+      data: masteryTrend.value.map((snapshot) => {
+        const item = snapshot.mastery.find((value) => value.name === name)
+        return item ? Math.round(Number(item.score)) : null
+      }),
+    })),
+  }
+})
 
 const reportSnapshot = computed<AnalyticsOverview | null>(() => {
   const raw = selectedReport.value?.metricSnapshotJson
@@ -142,12 +170,13 @@ function reportTypeLabel(type: string) {
 async function load() {
   loading.value = true
   try {
-    [overview.value, reports.value] = await Promise.all([
+    ;[overview.value, reports.value, masteryTrend.value] = await Promise.all([
       api<AnalyticsOverview>({
         url: '/analytics/overview',
         params: { start: range.value[0], end: range.value[1] },
       }),
       api<StudyReport[]>({ url: '/reports' }),
+      api<MasteryTrendSnapshot[]>({ url: '/analytics/mastery-trend' }),
     ])
   } finally {
     loading.value = false
@@ -240,10 +269,17 @@ onMounted(load)
             <b>{{ item.name }}</b>
             <small>{{ item.evidenceCount }} 条证据 · 置信度 {{ Math.round(Number(item.confidence) * 100) }}%</small>
           </div>
-          <el-progress :percentage="Math.round(Number(item.score) * 100)" />
+          <el-progress :percentage="Math.round(Number(item.score))" />
         </div>
       </section>
     </div>
+
+    <section v-if="masteryTrend.length" class="panel mastery-trend">
+      <div class="panel-title">
+        <div><h3>掌握度变化趋势</h3><p>每次测验完成后保存快照，可以看到知识点掌握度如何变化。</p></div>
+      </div>
+      <v-chart class="chart" :option="masteryTrendChart" autoresize />
+    </section>
 
     <section class="panel reports">
       <div class="panel-title">
@@ -326,7 +362,7 @@ onMounted(load)
               <b>{{ item.name }}</b>
               <small>{{ item.level }} · {{ item.evidenceCount }} 条证据 · 置信度 {{ Math.round(Number(item.confidence) * 100) }}%</small>
             </div>
-            <strong>{{ Math.round(Number(item.score) * 100) }}%</strong>
+            <strong>{{ Math.round(Number(item.score)) }}%</strong>
           </div>
         </section>
 
@@ -342,6 +378,7 @@ onMounted(load)
 <style scoped>
 .analytics-grid { grid-template-columns: 1.5fr 1fr; margin-top: 18px; }
 .chart { height: 330px; }
+.mastery-trend { margin-top: 18px; }
 .mastery-row { border-top: 1px solid var(--line); padding: 12px 0; }
 .mastery-row b,
 .mastery-row small { display: block; }

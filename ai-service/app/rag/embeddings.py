@@ -4,7 +4,7 @@ import asyncio
 import hashlib
 import math
 import re
-from typing import Protocol
+from typing import Any, Protocol
 
 from app.config import Settings
 from app.core.errors import ServiceError
@@ -69,10 +69,16 @@ class HashEmbeddingProvider:
         return tokens
 
 
-class SentenceTransformerEmbeddingProvider:
+class LangChainEmbeddingProvider:
+    """基于 LangChain ``HuggingFaceEmbeddings`` 的向量提供者。
+
+    用 LangChain 的 Embeddings 抽象替代手写 SentenceTransformer 包装，
+    保留懒加载、维度缓存与并发安全锁。
+    """
+
     def __init__(self, settings: Settings) -> None:
         self._settings = settings
-        self._model: object | None = None
+        self._model: Any | None = None
         self._lock = asyncio.Lock()
         self._dimension: int | None = None
 
@@ -91,28 +97,21 @@ class SentenceTransformerEmbeddingProvider:
 
     async def encode_documents(self, texts: list[str]) -> list[list[float]]:
         model = await self._load()
-        return await asyncio.to_thread(self._encode, model, texts, "document")
+        return await asyncio.to_thread(self._embed_documents, model, texts)
 
     async def encode_query(self, text: str) -> list[float]:
         model = await self._load()
-        values = await asyncio.to_thread(self._encode, model, [text], "query")
-        return values[0]
+        return await asyncio.to_thread(model.embed_query, text)
 
-    async def _load(self) -> object:
+    async def _load(self) -> Any:
         if self._model is not None:
             return self._model
         async with self._lock:
             if self._model is not None:
                 return self._model
             try:
-                from sentence_transformers import SentenceTransformer
-
-                model = await asyncio.to_thread(
-                    SentenceTransformer,
-                    self._settings.embedding_model,
-                    device=self._settings.embedding_device,
-                )
-                dimension = model.get_sentence_embedding_dimension()
+                model = await asyncio.to_thread(self._create_model, self._settings)
+                dimension = await asyncio.to_thread(self._infer_dimension, model)
             except Exception as error:
                 raise ServiceError(
                     "AI_DEPENDENCY_UNAVAILABLE",
@@ -125,12 +124,24 @@ class SentenceTransformerEmbeddingProvider:
             return model
 
     @staticmethod
-    def _encode(model: object, texts: list[str], kind: str) -> list[list[float]]:
-        method_name = "encode_query" if kind == "query" else "encode_document"
-        method = getattr(model, method_name, None)
-        if method is None:
-            method = model.encode  # type: ignore[attr-defined]
-        encoded = method(texts, normalize_embeddings=True, show_progress_bar=False)
+    def _create_model(settings: Settings) -> Any:
+        from langchain_huggingface import HuggingFaceEmbeddings
+        return HuggingFaceEmbeddings(
+            model_name=settings.embedding_model,
+            model_kwargs={"device": settings.embedding_device},
+            encode_kwargs={"normalize_embeddings": True},
+        )
+
+    @staticmethod
+    def _infer_dimension(model: Any) -> int:
+        underlying = getattr(model, "client", None)
+        if underlying is not None and hasattr(underlying, "get_sentence_embedding_dimension"):
+            return int(underlying.get_sentence_embedding_dimension())
+        return len(model.embed_query("dimension"))
+
+    @staticmethod
+    def _embed_documents(model: Any, texts: list[str]) -> list[list[float]]:
+        encoded = model.embed_documents(texts)
         return [[float(value) for value in row] for row in encoded]
 
 
@@ -183,7 +194,7 @@ class ResilientEmbeddingProvider:
 def build_embedding_provider(settings: Settings) -> EmbeddingProvider:
     if settings.embedding_provider == "hash":
         return HashEmbeddingProvider(settings.embedding_hash_dimension)
-    primary = SentenceTransformerEmbeddingProvider(settings)
+    primary = LangChainEmbeddingProvider(settings)
     fallback = (
         HashEmbeddingProvider(settings.embedding_hash_dimension, fallback=True)
         if settings.allow_hash_fallback

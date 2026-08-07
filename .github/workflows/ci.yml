@@ -1,0 +1,75 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: maven
+      - name: Backend tests (includes real MySQL Flyway migrations)
+        working-directory: backend
+        run: mvn --batch-mode test
+
+  ai-service:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+          cache: pip
+          cache-dependency-path: ai-service/constraints.lock
+      - name: Install locked dependencies
+        working-directory: ai-service
+        run: pip install -c constraints.lock -e ".[dev]"
+      - name: Ruff
+        working-directory: ai-service
+        run: ruff check app tests
+      - name: Mypy
+        working-directory: ai-service
+        run: mypy app
+      - name: Pytest
+        working-directory: ai-service
+        run: pytest -q
+
+  frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Install dependencies
+        working-directory: frontend
+        run: npm ci
+      - name: Type-check E2E tests
+        working-directory: frontend
+        run: npm run test:e2e:types
+      - name: Production build
+        working-directory: frontend
+        run: npm run build
+
+  compose:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate production compose
+        env:
+          MYSQL_ROOT_PASSWORD: ci-root-password
+          MYSQL_PASSWORD: ci-app-password
+          JWT_SECRET: ci-jwt-secret-with-at-least-thirty-two-characters
+          QDRANT_API_KEY: ci-qdrant-secret
+        run: docker compose config --quiet

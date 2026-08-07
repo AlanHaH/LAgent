@@ -30,6 +30,7 @@ public class AnalyticsService {
     private final ReportMapper reportMapper;
     private final ObjectMapper json;
     private final PythonAiServiceClient pythonAi;
+    private final LearningAggregationService aggregation;
 
     public record Metric(Object value, BigDecimal numerator, BigDecimal denominator, LocalDate periodStart,
                          LocalDate periodEnd, String timezone, Instant refreshedAt, String metricVersion) {
@@ -65,6 +66,25 @@ public class AnalyticsService {
             SELECT km.knowledge_point_id,kp.name,km.score,km.confidence,km.level,km.evidence_count,km.calculated_at
             FROM knowledge_mastery km JOIN knowledge_point kp ON kp.id=km.knowledge_point_id WHERE km.user_id=? ORDER BY kp.name
             """, (rs, row) -> Map.of("knowledgePointId", rs.getLong(1), "name", rs.getString(2), "score", rs.getBigDecimal(3), "confidence", rs.getBigDecimal(4), "level", rs.getString(5), "evidenceCount", rs.getInt(6), "calculatedAt", rs.getTimestamp(7).toInstant()), SecurityUtils.currentUserId());
+    }
+
+    public List<Map<String, Object>> masteryTrend() {
+        return jdbc.query("""
+                SELECT snapshot_at,data_json,calc_version
+                FROM mastery_snapshot
+                WHERE user_id=? AND scope_type='ALL'
+                ORDER BY snapshot_at
+                """, (rs, row) -> {
+            Map<String, Object> value = new LinkedHashMap<>();
+            value.put("snapshotAt", rs.getTimestamp(1).toInstant());
+            try {
+                value.put("mastery", json.readValue(rs.getString(2), Object.class));
+            } catch (JsonProcessingException e) {
+                value.put("mastery", List.of());
+            }
+            value.put("calcVersion", rs.getString(3));
+            return value;
+        }, SecurityUtils.currentUserId());
     }
 
     public StudyReportEntity generateReport(String type, LocalDate start, LocalDate end) {
@@ -144,19 +164,34 @@ public class AnalyticsService {
         m.put("taskCompletionRate", ratio(completed, planned, r));
         m.put("onTimeCompletionRate", ratio(onTime, completedWithDue, r));
         m.put("overdueRate", ratio(overdue, due, r));
+        Map<String, Object> overall = jdbc.queryForMap("""
+            SELECT
+              COALESCE(SUM(CASE WHEN task.lifecycle_status='COMPLETED'
+                THEN task.estimated_minutes ELSE 0 END),0) completed_minutes,
+              COALESCE(SUM(task.estimated_minutes),0) planned_minutes
+            FROM learning_task task
+            JOIN learning_goal goal ON goal.id=task.goal_id
+            WHERE goal.user_id=? AND goal.status IN ('ACTIVE','PAUSED')
+              AND goal.deleted_at IS NULL
+              AND task.lifecycle_status<>'CANCELED' AND task.deleted_at IS NULL
+            """, r.userId);
+        long overallCompleted = n(overall, "completed_minutes");
+        long overallPlanned = n(overall, "planned_minutes");
+        m.put("overallGoalTaskProgress", ratio(overallCompleted, overallPlanned, r));
         return m;
     }
 
     private List<DailyTime> studyTime(Range r) {
-        List<StudySessionEntity> sessions = sessionMapper.selectList(new LambdaQueryWrapper<StudySessionEntity>().eq(StudySessionEntity::getUserId, r.userId).eq(StudySessionEntity::getStatus, "COMPLETED").lt(StudySessionEntity::getStartedAt, r.to).gt(StudySessionEntity::getEndedAt, r.from));
-        Map<LocalDate, long[]> days = new TreeMap<>();
-        for (LocalDate d = r.start; !d.isAfter(r.end); d = d.plusDays(1)) days.put(d, new long[2]);
-        for (StudySessionEntity s : sessions)
-            for (var a : StudySessionService.allocate(s, r.zone)) {
-                long[] x = days.get(a.date());
-                if (x != null) x["MANUAL".equals(s.getSource()) ? 1 : 0] += a.effectiveSeconds();
-            }
-        return days.entrySet().stream().map(e -> new DailyTime(e.getKey(), e.getValue()[0], e.getValue()[1], e.getValue()[0] + e.getValue()[1])).toList();
+        aggregation.rollup(r.userId, r.zone, r.start, r.end);
+        return jdbc.query("""
+                SELECT local_date,auto_seconds,manual_seconds
+                FROM daily_study_stat
+                WHERE user_id=? AND metric_version='1.0' AND local_date BETWEEN ? AND ?
+                ORDER BY local_date
+                """, (rs, row) -> {
+            long auto = rs.getLong(2), manual = rs.getLong(3);
+            return new DailyTime(rs.getDate(1).toLocalDate(), auto, manual, auto + manual);
+        }, r.userId, r.start, r.end);
     }
 
     private Metric ratio(long numerator, long denominator, Range r) {

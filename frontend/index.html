@@ -5,6 +5,16 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="theme-color" content="#f4f1ea" />
     <title>知序 · 自适应学习管理系统</title>
+    <script>
+      // 挂载前应用已保存的主题，避免刷新闪白
+      ;(function () {
+        try {
+          var saved = localStorage.getItem('theme')
+          var dark = saved ? saved === 'dark' : window.matchMedia('(prefers-color-scheme: dark)').matches
+          document.documentElement.classList.toggle('dark', dark)
+        } catch (e) { /* localStorage 不可用时保持默认亮色 */ }
+      })()
+    </script>
   </head>
   <body><div id="app"></div><script type="module" src="/src/main.ts"></script></body>
 </html>

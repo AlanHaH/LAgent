@@ -2,10 +2,51 @@ import axios, { AxiosError, type AxiosRequestConfig } from 'axios'
 import { ElMessage } from 'element-plus'
 import type { ApiEnvelope, TokenPair } from '../types'
 
+// silent：后台轮询等请求不触发全局错误提示，由调用方自行处理
+declare module 'axios' {
+  export interface AxiosRequestConfig {
+    silent?: boolean
+  }
+}
+
 export const apiBaseURL = import.meta.env.VITE_API_BASE_URL || '/api/v1'
 const baseURL = apiBaseURL
 export const http = axios.create({ baseURL, timeout: 30000 })
 let refreshing: Promise<string> | null = null
+
+const anonymousAuthPaths = [
+  '/auth/login',
+  '/auth/register',
+  '/auth/password-reset',
+  '/auth/email-verification-codes',
+]
+
+function isAnonymousAuthRequest(url?: string) {
+  if (!url) return false
+  const path = url.split('?')[0].replace(baseURL, '')
+  return anonymousAuthPaths.some((item) => path.endsWith(item))
+}
+
+type ApiErrorBody = {
+  message?: string
+  error?: {
+    message?: string
+    fieldErrors?: Array<{ field?: string; message?: string }>
+  }
+  requestId?: string
+}
+
+function validationMessage(body?: ApiErrorBody) {
+  const fields = body?.error?.fieldErrors || []
+  if (!fields.length) return body?.message || body?.error?.message
+  const details = fields.slice(0, 3).map((item) => {
+    const field = item.field?.replace(/^profile\./, '个人档案.')
+      .replace(/^preference\./, '学习偏好.')
+      .replace(/^availability\./, '可用时间.')
+    return `${field || '参数'}：${item.message || '格式不正确'}`
+  })
+  return `${body?.error?.message || '请求参数校验失败'}（${details.join('；')}）`
+}
 
 async function refreshAccessToken(): Promise<string> {
   const refreshToken = localStorage.getItem('refresh_token')
@@ -21,16 +62,18 @@ async function refreshAccessToken(): Promise<string> {
 
 http.interceptors.request.use((config) => {
   const token = localStorage.getItem('access_token')
-  if (token) config.headers.Authorization = `Bearer ${token}`
+  if (token && !isAnonymousAuthRequest(config.url)) config.headers.Authorization = `Bearer ${token}`
+  else if (isAnonymousAuthRequest(config.url)) delete config.headers.Authorization
   config.headers['X-Request-Id'] ||= crypto.randomUUID()
   return config
 })
 
 http.interceptors.response.use(
   (response) => response,
-  async (error: AxiosError<{ message?: string; error?: { message?: string }; requestId?: string }>) => {
-    const original = error.config as (AxiosRequestConfig & { _retried?: boolean }) | undefined
-    if (error.response?.status === 401 && original && !original._retried && !String(original.url).includes('/auth/refresh')) {
+  async (error: AxiosError<ApiErrorBody>) => {
+    const original = error.config as (AxiosRequestConfig & { _retried?: boolean; silent?: boolean }) | undefined
+    if (error.response?.status === 401 && original && !original._retried
+        && !isAnonymousAuthRequest(original.url) && !String(original.url).includes('/auth/refresh')) {
       original._retried = true
       if (localStorage.getItem('refresh_token')) {
         try {
@@ -41,8 +84,9 @@ http.interceptors.response.use(
       }
     }
     const body = error.response?.data
-    const message = body?.message || body?.error?.message || error.message || '请求失败'
-    if (error.response?.status !== 401) ElMessage.error(`${message}${body?.requestId ? ` · ${body.requestId}` : ''}`)
+    const message = validationMessage(body) || error.message || '请求失败'
+    // silent: 轮询等后台请求不弹全局错误提示，由调用方自行处理
+    if (error.response?.status !== 401 && !original?.silent) ElMessage.error(`${message}${body?.requestId ? ` · ${body.requestId}` : ''}`)
     return Promise.reject(error)
   },
 )
@@ -53,6 +97,18 @@ export async function api<T>(config: AxiosRequestConfig): Promise<T> {
 }
 
 export const idempotencyKey = () => crypto.randomUUID()
+
+export async function checkPythonAiHealth(): Promise<boolean> {
+  try {
+    const { data } = await http.get<ApiEnvelope<{ status:string }>>(
+      '/system/ai-health',
+      { timeout: 20000, headers: { 'X-Request-Id': crypto.randomUUID() } },
+    )
+    return data.success === true && data.data?.status === 'UP'
+  } catch {
+    return false
+  }
+}
 
 export type SseEvent = { event:string; data:any }
 

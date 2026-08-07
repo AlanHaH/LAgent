@@ -20,6 +20,7 @@ import java.util.function.Consumer;
 import java.nio.charset.StandardCharsets;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.hamcrest.Matchers.containsString;
 import static org.mockito.ArgumentMatchers.*;
 import static org.mockito.Mockito.*;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.*;
@@ -86,7 +87,7 @@ class ProfileInterviewIntegrationTest {
         mvc.perform(get("/api/v1/profiles/me").header("Authorization", "Bearer " + token))
                 .andExpect(status().isOk()).andExpect(jsonPath("$.data").doesNotExist());
 
-        mvc.perform(post("/api/v1/profiles/me/interview-sessions/{id}/confirmation", sessionId)
+        String confirmed = mvc.perform(post("/api/v1/profiles/me/interview-sessions/{id}/confirmation", sessionId)
                         .header("Authorization", "Bearer " + token).contentType(MediaType.APPLICATION_JSON)
                         .content("{\"version\":" + turnVersion + "}"))
                 .andExpect(status().isOk())
@@ -94,11 +95,122 @@ class ProfileInterviewIntegrationTest {
                 .andExpect(jsonPath("$.data.profile.planStartDate").value("2026-08-01"))
                 .andExpect(jsonPath("$.data.profile.planEndDate").value("2026-09-30"))
                 .andExpect(jsonPath("$.data.profile.planPeriodDays").value(61))
-                .andExpect(jsonPath("$.data.profile.status").value("GENERATED"));
+                .andExpect(jsonPath("$.data.profile.status").value("DRAFT"))
+                .andExpect(jsonPath("$.data.generationJob.status").value("QUEUED"))
+                .andReturn().getResponse().getContentAsString();
+        awaitGeneration(token, json.readTree(confirmed).path("data").path("generationJob").path("publicId").asText());
+
+        mvc.perform(get("/api/v1/profiles/me").header("Authorization", "Bearer " + token))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.data.status").value("GENERATED"));
 
         mvc.perform(get("/api/v1/profiles/me/versions").header("Authorization", "Bearer " + token))
                 .andExpect(status().isOk()).andExpect(jsonPath("$.data[0].versionNo").value(1));
         verify(modelClient).complete(anyString(), contains("latestUserMessage"));
+    }
+
+    @Test
+    void manualSaveIsAtomicAndSynchronizesTheInterviewDraft() throws Exception {
+        String token = register("profile_manual", "profile-manual@example.com");
+        String started = mvc.perform(post("/api/v1/profiles/me/interview-sessions")
+                        .header("Authorization", "Bearer " + token)
+                        .contentType(MediaType.APPLICATION_JSON).content("{}"))
+                .andExpect(status().isCreated()).andReturn().getResponse().getContentAsString();
+        JsonNode session = json.readTree(started).path("data");
+
+        String request = """
+                {
+                  "interviewSessionId":"%s",
+                  "interviewVersion":%d,
+                  "profile":{
+                    "timezone":"Asia/Shanghai","weekStart":1,"planPeriodDays":7,
+                    "planStartDate":"2026-08-03","planEndDate":"2026-08-09",
+                    "backgroundText":"零基础，希望系统学习心理学。",
+                    "directions":[{"directionId":null,"customDirection":"心理学","currentStage":"BEGINNER","primary":true}],
+                    "version":null
+                  },
+                  "preference":{
+                    "contentModes":["TEXT","PRACTICE"],"guidanceStyle":"SOCRATIC",
+                    "taskGranularity":"MEDIUM","focusMinutes":45,"capacityRatio":0.85,
+                    "difficultyMin":1,"difficultyMax":4,"reminders":{"TASK_DUE":true},"version":null
+                  },
+                  "availability":{"slots":[
+                    {"weekday":1,"start":"19:00","end":"21:00","energyLevel":"HIGH"}
+                  ]}
+                }
+                """.formatted(session.path("id").asText(), session.path("version").asInt());
+
+        String saved = mvc.perform(post("/api/v1/profiles/me/manual-save")
+                        .header("Authorization", "Bearer " + token)
+                        .contentType(MediaType.APPLICATION_JSON).content(request))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data.profile.status").value("DRAFT"))
+                .andExpect(jsonPath("$.data.generationJob.status").value("QUEUED"))
+                .andExpect(jsonPath("$.data.profile.planPeriodDays").value(7))
+                .andExpect(jsonPath("$.data.profile.directions[0].customDirection").value("心理学"))
+                .andExpect(jsonPath("$.data.profile.directions[0].sourceType").value("CUSTOM"))
+                .andExpect(jsonPath("$.data.profile.directions[0].knowledgeBaseDirection").value(false))
+                .andExpect(jsonPath("$.data.interview.status").value("CONFIRMED"))
+                .andExpect(jsonPath("$.data.interview.assistantMode").value("MANUAL"))
+                .andExpect(jsonPath("$.data.interview.completenessPercent").value(100))
+                .andExpect(jsonPath("$.data.interview.draft.customDirection").value("心理学"))
+                .andExpect(jsonPath("$.data.interview.draft.planStartDate").value("2026-08-03"))
+                .andExpect(jsonPath("$.data.interview.draft.planEndDate").value("2026-08-09"))
+                .andExpect(jsonPath("$.data.interview.draft.availability[0].weekday").value(1))
+                .andReturn().getResponse().getContentAsString();
+        awaitGeneration(token, json.readTree(saved).path("data").path("generationJob").path("publicId").asText());
+
+        mvc.perform(get("/api/v1/profiles/me/versions").header("Authorization", "Bearer " + token))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data[0].versionNo").value(1))
+                .andExpect(jsonPath("$.data[0].triggerType").value("MANUAL_SAVE"))
+                .andExpect(jsonPath("$.data[0].snapshotJson").value(containsString("\\\"sourceType\\\":\\\"CUSTOM\\\"")))
+                .andExpect(jsonPath("$.data[0].snapshotJson").value(containsString("\\\"knowledgeBaseDirection\\\":false")));
+    }
+
+    @Test
+    void invalidManualAvailabilityRollsBackEveryProfileWrite() throws Exception {
+        String token = register("profile_rollback", "profile-rollback@example.com");
+        String started = mvc.perform(post("/api/v1/profiles/me/interview-sessions")
+                        .header("Authorization", "Bearer " + token)
+                        .contentType(MediaType.APPLICATION_JSON).content("{}"))
+                .andExpect(status().isCreated()).andReturn().getResponse().getContentAsString();
+        JsonNode session = json.readTree(started).path("data");
+
+        String request = """
+                {
+                  "interviewSessionId":"%s",
+                  "interviewVersion":%d,
+                  "profile":{
+                    "timezone":"Asia/Shanghai","weekStart":1,"planPeriodDays":7,
+                    "planStartDate":"2026-08-03","planEndDate":"2026-08-09",
+                    "directions":[{"directionId":null,"customDirection":"心理学","currentStage":"BEGINNER","primary":true}],
+                    "version":null
+                  },
+                  "preference":{
+                    "contentModes":["TEXT"],"guidanceStyle":"DIRECT","taskGranularity":"MEDIUM",
+                    "focusMinutes":45,"capacityRatio":0.85,"difficultyMin":1,"difficultyMax":4,
+                    "reminders":{},"version":null
+                  },
+                  "availability":{"slots":[
+                    {"weekday":1,"start":"19:00","end":"21:00","energyLevel":"HIGH"},
+                    {"weekday":1,"start":"20:00","end":"22:00","energyLevel":"MEDIUM"}
+                  ]}
+                }
+                """.formatted(session.path("id").asText(), session.path("version").asInt());
+
+        mvc.perform(post("/api/v1/profiles/me/manual-save")
+                        .header("Authorization", "Bearer " + token)
+                        .contentType(MediaType.APPLICATION_JSON).content(request))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.error.message").value(org.hamcrest.Matchers.containsString("重叠")));
+
+        mvc.perform(get("/api/v1/profiles/me").header("Authorization", "Bearer " + token))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.data").doesNotExist());
+        mvc.perform(get("/api/v1/profiles/me/interview-sessions/active")
+                        .header("Authorization", "Bearer " + token))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data.status").value("ACTIVE"))
+                .andExpect(jsonPath("$.data.version").value(session.path("version").asInt()));
     }
 
     @Test
@@ -142,6 +254,19 @@ class ProfileInterviewIntegrationTest {
                         "event:message.completed", "2026-10-01")
                 .doesNotContain("directionQuery");
         verify(modelClient).completeStreaming(anyString(), contains("latestUserMessage"), any());
+    }
+
+    private void awaitGeneration(String token, String jobId) throws Exception {
+        for (int attempt = 0; attempt < 100; attempt++) {
+            String body = mvc.perform(get("/api/v1/profiles/me/generation-jobs/{id}", jobId)
+                            .header("Authorization", "Bearer " + token))
+                    .andExpect(status().isOk()).andReturn().getResponse().getContentAsString();
+            String status = json.readTree(body).path("data").path("status").asText();
+            if ("SUCCEEDED".equals(status)) return;
+            assertThat(status).isNotEqualTo("FAILED");
+            Thread.sleep(25);
+        }
+        throw new AssertionError("画像生成作业未在测试时限内完成: " + jobId);
     }
 
     private String register(String username, String email) throws Exception {

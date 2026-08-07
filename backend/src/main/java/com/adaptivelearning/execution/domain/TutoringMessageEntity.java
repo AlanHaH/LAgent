@@ -20,5 +20,6 @@ public class TutoringMessageEntity {
     private String content;
     private Integer guidanceLevel;
     private Long modelRunId;
+    private String metadataJson;
     private Instant createdAt;
 }

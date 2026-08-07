@@ -10,6 +10,9 @@ import com.adaptivelearning.shared.exception.BusinessException;
 import com.adaptivelearning.shared.exception.ErrorCode;
 import com.adaptivelearning.shared.security.SecurityUtils;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import com.baomidou.mybatisplus.core.toolkit.IdWorker;
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -33,8 +36,9 @@ public class GoalRecommendationService {
     private final GoalMapper goalMapper;
     private final PythonAiServiceClient pythonAi;
     private final JdbcTemplate jdbc;
+    private final ObjectMapper objectMapper;
 
-    public record Recommendation(String id, long directionId, String directionName, String name,
+    public record Recommendation(String id, Long directionId, String customDirection, String directionName, String name,
                                  String type, String description, String priority,
                                  LocalDate startDate, LocalDate dueDate, int weeklyBudgetMinutes,
                                  List<Map<String, Object>> successCriteria, String reason,
@@ -72,16 +76,8 @@ public class GoalRecommendationService {
                 .map(this::directionContext)
                 .flatMap(Optional::stream)
                 .toList();
-        if (directions.isEmpty()) {
-            String custom = storedDirections.stream()
-                    .map(ProfileDirectionEntity::getCustomDirection)
-                    .filter(Objects::nonNull)
-                    .filter(text -> !text.isBlank())
-                    .findFirst()
-                    .orElse("自定义方向");
-            throw new BusinessException(ErrorCode.COMMON_VALIDATION_ERROR,
-                    "当前画像方向「" + custom + "」未映射到学习目录，请先在画像页把学习方向改为目录方向，例如经济学、Java 后端开发或 AI Agent 与智能应用");
-        }
+        if (directions.isEmpty())
+            throw new BusinessException(ErrorCode.COMMON_VALIDATION_ERROR, "当前画像没有可用学习方向，请先完善画像");
 
         LearningPreferenceEntity preference = preferenceMapper.selectOne(
                 new LambdaQueryWrapper<LearningPreferenceEntity>().eq(LearningPreferenceEntity::getUserId, userId));
@@ -107,13 +103,14 @@ public class GoalRecommendationService {
                                 item.currentStage(), item.primary())).toList(),
                         preferenceContext(preference), weeklyCapacity, existingNames, count));
         List<RecommendationSeed> seeds = result.recommendations().stream().map(item -> new RecommendationSeed(
-                item.directionId(), item.name(), item.type(), item.description(), item.priority(),
+                item.directionId(), item.customDirection(), item.name(), item.type(), item.description(), item.priority(),
                 item.durationDays(), item.weeklyBudgetMinutes(), item.successCriteria(),
                 item.reason(), item.milestones())).toList();
         String source = "AI";
 
         Map<Long, String> directionNames = new HashMap<>();
-        directions.forEach(item -> directionNames.put(item.id(), item.name()));
+        directions.stream().filter(item -> item.id() != null)
+                .forEach(item -> directionNames.put(item.id(), item.name()));
         String recommendationSource = source;
         long remainingDays = ChronoUnit.DAYS.between(start, profile.getPlanEndDate()) + 1;
         List<Recommendation> recommendations = seeds.stream().limit(count).map(seed -> {
@@ -122,14 +119,52 @@ public class GoalRecommendationService {
             List<Map<String, Object>> criteria = seed.successCriteria().stream().limit(5)
                     .map(text -> Map.<String, Object>of("type", "OUTCOME", "description", text,
                             "completed", false)).toList();
-            return new Recommendation(UUID.randomUUID().toString(), seed.directionId(),
-                    directionNames.getOrDefault(seed.directionId(), "当前学习方向"), seed.name(),
+            String directionName = seed.directionId() == null
+                    ? seed.customDirection()
+                    : directionNames.getOrDefault(seed.directionId(), "当前学习方向");
+            return new Recommendation(UUID.randomUUID().toString(), seed.directionId(), seed.customDirection(),
+                    directionName, seed.name(),
                     seed.type(), seed.description(), seed.priority(), start, dueDate,
                     Math.max(10, Math.min(seed.weeklyBudgetMinutes(), weeklyCapacity)), criteria,
                     seed.reason(), seed.milestones(), recommendationSource);
         }).toList();
-        return new RecommendationResponse(String.valueOf(version.getId()), version.getVersionNo(), Instant.now(), source,
-                recommendations);
+        RecommendationResponse response = new RecommendationResponse(
+                String.valueOf(version.getId()), version.getVersionNo(), Instant.now(), source, recommendations);
+        saveBatch(userId, version, response);
+        return response;
+    }
+
+    public RecommendationResponse latest() {
+        long userId = SecurityUtils.currentUserId();
+        List<String> payloads = jdbc.query("""
+                SELECT response_json
+                FROM goal_recommendation_batch
+                WHERE user_id=?
+                ORDER BY generated_at DESC,id DESC
+                LIMIT 1
+                """, (rs, row) -> rs.getString(1), userId);
+        if (payloads.isEmpty()) return null;
+        try {
+            return objectMapper.readValue(payloads.get(0), RecommendationResponse.class);
+        } catch (JsonProcessingException error) {
+            log.warn("无法读取用户 {} 的历史目标推荐", userId, error);
+            return null;
+        }
+    }
+
+    private void saveBatch(long userId, ProfileVersionEntity version, RecommendationResponse response) {
+        try {
+            jdbc.update("""
+                    INSERT INTO goal_recommendation_batch(
+                      id,public_id,user_id,profile_version_id,profile_version_no,source,
+                      response_json,generated_at,created_at
+                    ) VALUES(?,?,?,?,?,?,?,?,?)
+                    """, IdWorker.getId(), UUID.randomUUID().toString(), userId, version.getId(),
+                    version.getVersionNo(), response.source(),
+                    objectMapper.writeValueAsString(response), response.generatedAt(), Instant.now());
+        } catch (JsonProcessingException error) {
+            throw new IllegalStateException("目标推荐结果序列化失败", error);
+        }
     }
 
     private Map<String, Object> preferenceContext(LearningPreferenceEntity preference) {
@@ -155,9 +190,15 @@ public class GoalRecommendationService {
             return Optional.of(new DirectionContext(item.getDirectionId(), directionName(item.getDirectionId()),
                     item.getCurrentStage(), Boolean.TRUE.equals(item.getIsPrimary())));
         }
-        return matchCatalogDirection(item.getCustomDirection())
-                .map(match -> new DirectionContext(match.id(), match.name(), item.getCurrentStage(),
-                        Boolean.TRUE.equals(item.getIsPrimary())));
+        Optional<CatalogDirection> catalog = matchCatalogDirection(item.getCustomDirection());
+        if (catalog.isPresent()) {
+            CatalogDirection match = catalog.get();
+            return Optional.of(new DirectionContext(match.id(), match.name(), item.getCurrentStage(),
+                    Boolean.TRUE.equals(item.getIsPrimary())));
+        }
+        if (item.getCustomDirection() == null || item.getCustomDirection().isBlank()) return Optional.empty();
+        return Optional.of(new DirectionContext(null, item.getCustomDirection().trim(), item.getCurrentStage(),
+                Boolean.TRUE.equals(item.getIsPrimary())));
     }
 
     private Optional<CatalogDirection> matchCatalogDirection(String query) {
@@ -184,9 +225,9 @@ public class GoalRecommendationService {
         return value.toLowerCase(Locale.ROOT).replaceAll("[\\s_\\-·]+", "");
     }
 
-    private record DirectionContext(long id, String name, String currentStage, boolean primary) { }
+    private record DirectionContext(Long id, String name, String currentStage, boolean primary) { }
     private record CatalogDirection(long id, String code, String name) { }
-    private record RecommendationSeed(long directionId, String name, String type, String description,
+    private record RecommendationSeed(Long directionId, String customDirection, String name, String type, String description,
                                       String priority, int durationDays, int weeklyBudgetMinutes,
                                       List<String> successCriteria, String reason,
                                       List<String> milestones) { }

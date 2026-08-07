@@ -81,6 +81,35 @@ async def test_index_search_permission_filter_and_delete() -> None:
 
 
 @pytest.mark.asyncio
+async def test_search_filters_by_document_ids() -> None:
+    configured = settings()
+    retrieval = RagRetrievalService(
+        configured,
+        HashEmbeddingProvider(),
+        QdrantVectorStore(configured),
+    )
+    indexed = await retrieval.index(index_request())
+    assert indexed.indexed_chunks == 1
+
+    scoped = await retrieval.search(
+        SearchRequest.model_validate(
+            {"userId": 1, "query": "无状态认证如何扩展", "allowedDocumentIds": [20]}
+        )
+    )
+    assert [item.chunk_id for item in scoped.hits] == [100]
+
+    other_doc = await retrieval.search(
+        SearchRequest.model_validate(
+            {"userId": 1, "query": "无状态认证如何扩展", "allowedDocumentIds": [99]}
+        )
+    )
+    assert other_doc.hits == []
+
+    with pytest.raises(ValueError, match="至少提供一个"):
+        SearchRequest.model_validate({"userId": 1, "query": "无状态认证如何扩展"})
+
+
+@pytest.mark.asyncio
 async def test_rag_answer_validates_citations_and_falls_back() -> None:
     configured = settings()
     valid = FakeModelClient(answer="它便于水平扩展。[S1]")

@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from fastapi import Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+
+logger = logging.getLogger(__name__)
 
 
 class ServiceError(Exception):
@@ -30,6 +33,13 @@ def request_id(request: Request) -> str:
 
 
 async def service_error_handler(request: Request, error: ServiceError) -> JSONResponse:
+    logger.warning(
+        "service_error requestId=%s code=%s retryable=%s details=%s",
+        request_id(request),
+        error.code,
+        error.retryable,
+        error.details,
+    )
     return JSONResponse(
         status_code=error.status_code,
         content={
@@ -45,7 +55,12 @@ async def service_error_handler(request: Request, error: ServiceError) -> JSONRe
     )
 
 
-async def unexpected_error_handler(request: Request, _: Exception) -> JSONResponse:
+async def unexpected_error_handler(request: Request, error: Exception) -> JSONResponse:
+    logger.exception(
+        "unexpected_error requestId=%s exception=%s",
+        request_id(request),
+        type(error).__name__,
+    )
     return JSONResponse(
         status_code=500,
         content={
@@ -63,13 +78,11 @@ async def unexpected_error_handler(request: Request, _: Exception) -> JSONRespon
 
 async def validation_error_handler(request: Request, error: RequestValidationError) -> JSONResponse:
     fields = [".".join(str(part) for part in item.get("loc", ())) for item in error.errors()[:20]]
-    body = await request.body()
-    try:
-        import datetime
-        with open("ai-422-debug.log", "a", encoding="utf-8") as fh:
-            fh.write(f"{datetime.datetime.now().isoformat()} fields={fields}\nbody={body.decode('utf-8', errors='replace')[:2000]}\n\n")
-    except Exception:
-        pass
+    logger.warning(
+        "request_validation_failed requestId=%s fields=%s",
+        request_id(request),
+        fields,
+    )
     return JSONResponse(
         status_code=422,
         content={

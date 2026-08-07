@@ -1,0 +1,268 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mxfile host="drawio" version="26.0.0">
+  <diagram id="current-flow" name="现状流程与断点">
+    <mxGraphModel dx="2200" dy="1400" grid="1" gridSize="10" page="1" pageScale="1" pageWidth="2200" pageHeight="1400">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <mxCell id="2" value="当前业务主流程" style="text;html=1;align=left;verticalAlign=middle;fontSize=24;fontStyle=1;fontColor=#173d31;" vertex="1" parent="1">
+          <mxGeometry x="40" y="20" width="500" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="3" value="蓝色：用户动作　绿色：正式生效　黄色：异步/待确认　红色：已确认的业务断点" style="text;html=1;align=left;verticalAlign=middle;fontSize=12;fontColor=#666666;" vertex="1" parent="1">
+          <mxGeometry x="40" y="60" width="800" height="30" as="geometry" />
+        </mxCell>
+
+        <mxCell id="4" value="1. 账户与画像" style="swimlane;startSize=34;horizontal=0;fillColor=#f5f5f5;strokeColor=#9e9e9e;fontStyle=1;pointerEvents=0;" vertex="1" parent="1">
+          <mxGeometry x="40" y="110" width="300" height="760" as="geometry" />
+        </mxCell>
+        <mxCell id="5" value="注册 / 登录" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="4">
+          <mxGeometry x="70" y="60" width="180" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="6" value="画像访谈或手动填写&#xa;方向、阶段、日期、可用时间" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="4">
+          <mxGeometry x="50" y="180" width="220" height="80" as="geometry" />
+        </mxCell>
+        <mxCell id="7" value="生成画像版本" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;" vertex="1" parent="4">
+          <mxGeometry x="70" y="330" width="180" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="8" value="画像完成后没有强引导到目标&#xa;Alan 当前实际停在这里" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontStyle=1;" vertex="1" parent="4">
+          <mxGeometry x="40" y="470" width="240" height="90" as="geometry" />
+        </mxCell>
+        <mxCell id="9" value="再次进入画像页会保留一条&#xa;100% 完整但 ACTIVE 的访谈草稿" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;" vertex="1" parent="4">
+          <mxGeometry x="40" y="620" width="240" height="80" as="geometry" />
+        </mxCell>
+
+        <mxCell id="10" value="2. 目标与计划" style="swimlane;startSize=34;horizontal=0;fillColor=#f5f5f5;strokeColor=#9e9e9e;fontStyle=1;pointerEvents=0;" vertex="1" parent="1">
+          <mxGeometry x="380" y="110" width="420" height="1000" as="geometry" />
+        </mxCell>
+        <mxCell id="11" value="用户另点一次“让 AI 推荐”&#xa;或直接新建目标" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="10">
+          <mxGeometry x="100" y="60" width="240" height="70" as="geometry" />
+        </mxCell>
+        <mxCell id="12" value="目标 DRAFT" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="10">
+          <mxGeometry x="130" y="180" width="180" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="13" value="激活目标" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;" vertex="1" parent="10">
+          <mxGeometry x="130" y="290" width="180" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="14" value="自动提交规划作业&#xa;QUEUED / RUNNING" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;" vertex="1" parent="10">
+          <mxGeometry x="100" y="400" width="240" height="70" as="geometry" />
+        </mxCell>
+        <mxCell id="15" value="前端立即提示“已生成方案”&#xa;但后台其实刚排队" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;" vertex="1" parent="10">
+          <mxGeometry x="90" y="510" width="260" height="70" as="geometry" />
+        </mxCell>
+        <mxCell id="16" value="Agent 提案 → 校验 → 用户确认" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;" vertex="1" parent="10">
+          <mxGeometry x="90" y="630" width="260" height="70" as="geometry" />
+        </mxCell>
+        <mxCell id="17" value="发布计划并生成任务 / 知识块" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;" vertex="1" parent="10">
+          <mxGeometry x="90" y="750" width="260" height="70" as="geometry" />
+        </mxCell>
+        <mxCell id="18" value="计划页混入 DRAFT / PAUSED 目标&#xa;后端只允许 ACTIVE；目标跳转也会丢失上下文" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;" vertex="1" parent="10">
+          <mxGeometry x="60" y="870" width="320" height="80" as="geometry" />
+        </mxCell>
+
+        <mxCell id="19" value="3. 每日学习与反馈" style="swimlane;startSize=34;horizontal=0;fillColor=#f5f5f5;strokeColor=#9e9e9e;fontStyle=1;pointerEvents=0;" vertex="1" parent="1">
+          <mxGeometry x="840" y="110" width="420" height="1180" as="geometry" />
+        </mxCell>
+        <mxCell id="20" value="今日任务图" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="19">
+          <mxGeometry x="120" y="60" width="180" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="21" value="生成当前知识块&#xa;资料 → 练习 → 块测" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;" vertex="1" parent="19">
+          <mxGeometry x="90" y="180" width="240" height="70" as="geometry" />
+        </mxCell>
+        <mxCell id="22" value="开始 / 计时 / 学习" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="19">
+          <mxGeometry x="120" y="310" width="180" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="23" value="点击“完成学习”&#xa;任务先变 COMPLETED" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;" vertex="1" parent="19">
+          <mxGeometry x="100" y="430" width="220" height="70" as="geometry" />
+        </mxCell>
+        <mxCell id="24" value="此时自动优化已经触发&#xa;但块测还没发生" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontStyle=1;" vertex="1" parent="19">
+          <mxGeometry x="80" y="540" width="260" height="80" as="geometry" />
+        </mxCell>
+        <mxCell id="25" value="提交块测" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="19">
+          <mxGeometry x="120" y="680" width="180" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="26" value="是否达到通过分？" style="rhombus;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;" vertex="1" parent="19">
+          <mxGeometry x="110" y="800" width="200" height="100" as="geometry" />
+        </mxCell>
+        <mxCell id="27" value="通过：解锁后继任务" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;" vertex="1" parent="19">
+          <mxGeometry x="190" y="960" width="190" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="28" value="未通过：复习后重测" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;" vertex="1" parent="19">
+          <mxGeometry x="20" y="960" width="160" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="29" value="块测成绩不进入掌握度&#xa;“学会了”和“掌握度”两套口径" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;" vertex="1" parent="19">
+          <mxGeometry x="80" y="1070" width="270" height="70" as="geometry" />
+        </mxCell>
+
+        <mxCell id="30" value="4. 三条平行支线" style="swimlane;startSize=34;horizontal=0;fillColor=#f5f5f5;strokeColor=#9e9e9e;fontStyle=1;pointerEvents=0;" vertex="1" parent="1">
+          <mxGeometry x="1300" y="110" width="420" height="1180" as="geometry" />
+        </mxCell>
+        <mxCell id="31" value="知识库：上传 → 后台解析 → 索引" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="30">
+          <mxGeometry x="70" y="60" width="280" height="70" as="geometry" />
+        </mxCell>
+        <mxCell id="32" value="上传后不自动轮询；删除尚未完成&#xa;却提示“已删除”" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;" vertex="1" parent="30">
+          <mxGeometry x="70" y="160" width="280" height="70" as="geometry" />
+        </mxCell>
+        <mxCell id="33" value="资料问答：选择文档 → 创建会话 → 提问" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="30">
+          <mxGeometry x="50" y="300" width="320" height="70" as="geometry" />
+        </mxCell>
+        <mxCell id="34" value="会话创建后检索范围已冻结&#xa;页面仍允许勾选，勾选变化不会生效" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;" vertex="1" parent="30">
+          <mxGeometry x="60" y="400" width="300" height="80" as="geometry" />
+        </mxCell>
+        <mxCell id="35" value="独立测评 → 批改 → 掌握度" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="30">
+          <mxGeometry x="90" y="560" width="240" height="70" as="geometry" />
+        </mxCell>
+        <mxCell id="36" value="实际只有独立测评写入掌握度&#xa;块测、项目证据未接入" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;" vertex="1" parent="30">
+          <mxGeometry x="70" y="660" width="280" height="80" as="geometry" />
+        </mxCell>
+        <mxCell id="37" value="实践项目 → 里程碑 → 项目完成" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="30">
+          <mxGeometry x="80" y="820" width="260" height="70" as="geometry" />
+        </mxCell>
+        <mxCell id="38" value="项目虽关联目标，但规划页不传项目&#xa;任务和里程碑没有形成同一执行链" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;" vertex="1" parent="30">
+          <mxGeometry x="60" y="920" width="300" height="80" as="geometry" />
+        </mxCell>
+        <mxCell id="39" value="画像周期、目标周期、项目周期并存&#xa;三个日期口径容易互相冲突" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;" vertex="1" parent="30">
+          <mxGeometry x="60" y="1060" width="300" height="70" as="geometry" />
+        </mxCell>
+
+        <mxCell id="40" value="5. 结束与复盘" style="swimlane;startSize=34;horizontal=0;fillColor=#f5f5f5;strokeColor=#9e9e9e;fontStyle=1;pointerEvents=0;" vertex="1" parent="1">
+          <mxGeometry x="1760" y="110" width="380" height="760" as="geometry" />
+        </mxCell>
+        <mxCell id="41" value="所有知识块通过&#xa;提示目标可完成" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;" vertex="1" parent="40">
+          <mxGeometry x="80" y="100" width="220" height="70" as="geometry" />
+        </mxCell>
+        <mxCell id="42" value="用户点击“标记抵达”" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="40">
+          <mxGeometry x="90" y="250" width="200" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="43" value="成功标准是否已全部勾选？" style="rhombus;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;" vertex="1" parent="40">
+          <mxGeometry x="70" y="380" width="240" height="100" as="geometry" />
+        </mxCell>
+        <mxCell id="44" value="页面没有勾选成功标准的入口&#xa;且请求不允许例外确认，因此完成路径被堵死" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontStyle=1;" vertex="1" parent="40">
+          <mxGeometry x="40" y="540" width="300" height="100" as="geometry" />
+        </mxCell>
+
+        <mxCell id="50" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=0.5;exitY=1;entryX=0.5;entryY=0;" edge="1" parent="4" source="5" target="6"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="51" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=0.5;exitY=1;entryX=0.5;entryY=0;" edge="1" parent="4" source="6" target="7"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="52" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=0.5;exitY=1;entryX=0.5;entryY=0;strokeColor=#b85450;" edge="1" parent="4" source="7" target="8"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="53" value="用户自行发现目标页" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;dashed=1;exitX=1;exitY=0.5;entryX=0;entryY=0.2;" edge="1" parent="1" source="7" target="11"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="54" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=0.5;exitY=1;entryX=0.5;entryY=0;" edge="1" parent="10" source="11" target="12"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="55" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=0.5;exitY=1;entryX=0.5;entryY=0;" edge="1" parent="10" source="12" target="13"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="56" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=0.5;exitY=1;entryX=0.5;entryY=0;" edge="1" parent="10" source="13" target="14"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="57" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=0.5;exitY=1;entryX=0.5;entryY=0;strokeColor=#b85450;" edge="1" parent="10" source="14" target="15"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="58" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=0.5;exitY=1;entryX=0.5;entryY=0;" edge="1" parent="10" source="15" target="16"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="59" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=0.5;exitY=1;entryX=0.5;entryY=0;" edge="1" parent="10" source="16" target="17"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="60" value="正式任务" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=1;exitY=0.5;entryX=0;entryY=0.2;" edge="1" parent="1" source="17" target="20"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="61" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=0.5;exitY=1;entryX=0.5;entryY=0;" edge="1" parent="19" source="20" target="21"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="62" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=0.5;exitY=1;entryX=0.5;entryY=0;" edge="1" parent="19" source="21" target="22"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="63" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=0.5;exitY=1;entryX=0.5;entryY=0;" edge="1" parent="19" source="22" target="23"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="64" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=0.5;exitY=1;entryX=0.5;entryY=0;strokeColor=#b85450;" edge="1" parent="19" source="23" target="24"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="65" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=0.5;exitY=1;entryX=0.5;entryY=0;" edge="1" parent="19" source="24" target="25"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="66" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=0.5;exitY=1;entryX=0.5;entryY=0;" edge="1" parent="19" source="25" target="26"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="67" value="是" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=0.75;exitY=1;entryX=0.5;entryY=0;strokeColor=#82b366;" edge="1" parent="19" source="26" target="27"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="68" value="否" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=0.25;exitY=1;entryX=0.5;entryY=0;strokeColor=#d79b00;" edge="1" parent="19" source="26" target="28"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="70" value="全部通过" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=1;exitY=0.5;entryX=0;entryY=0.5;" edge="1" parent="1" source="27" target="41"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="71" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=0.5;exitY=1;entryX=0.5;entryY=0;" edge="1" parent="40" source="41" target="42"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="72" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=0.5;exitY=1;entryX=0.5;entryY=0;" edge="1" parent="40" source="42" target="43"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="73" value="否" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=0.5;exitY=1;entryX=0.5;entryY=0;strokeColor=#b85450;" edge="1" parent="40" source="43" target="44"><mxGeometry relative="1" as="geometry" /></mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+
+  <diagram id="recommended-flow" name="建议主流程">
+    <mxGraphModel dx="1800" dy="1200" grid="1" gridSize="10" page="1" pageScale="1" pageWidth="1800" pageHeight="1200">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <mxCell id="2" value="建议：收敛为一条学习闭环" style="text;html=1;align=left;verticalAlign=middle;fontSize=24;fontStyle=1;fontColor=#173d31;" vertex="1" parent="1">
+          <mxGeometry x="40" y="30" width="500" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="3" value="知识库、问答和项目都作为主流程的工具或成果形态，不再与学习主线平级。" style="text;html=1;align=left;verticalAlign=middle;fontSize=13;fontColor=#666666;" vertex="1" parent="1">
+          <mxGeometry x="40" y="70" width="850" height="30" as="geometry" />
+        </mxCell>
+
+        <mxCell id="4" value="一次性设置" style="swimlane;startSize=32;fillColor=#f5f5f5;strokeColor=#9e9e9e;fontStyle=1;pointerEvents=0;" vertex="1" parent="1">
+          <mxGeometry x="40" y="140" width="300" height="300" as="geometry" />
+        </mxCell>
+        <mxCell id="5" value="学习方向 + 当前水平&#xa;每周可用时间 + 偏好" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="4">
+          <mxGeometry x="40" y="70" width="220" height="80" as="geometry" />
+        </mxCell>
+        <mxCell id="6" value="可选：基线诊断&#xa;建立初始掌握度" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;" vertex="1" parent="4">
+          <mxGeometry x="50" y="190" width="200" height="70" as="geometry" />
+        </mxCell>
+
+        <mxCell id="7" value="定义结果" style="swimlane;startSize=32;fillColor=#f5f5f5;strokeColor=#9e9e9e;fontStyle=1;pointerEvents=0;" vertex="1" parent="1">
+          <mxGeometry x="390" y="140" width="300" height="300" as="geometry" />
+        </mxCell>
+        <mxCell id="8" value="创建一个目标&#xa;日期、预算、可勾选成功标准" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="7">
+          <mxGeometry x="40" y="70" width="220" height="80" as="geometry" />
+        </mxCell>
+        <mxCell id="9" value="可选成果形态&#xa;课程型 / 项目型" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;" vertex="1" parent="7">
+          <mxGeometry x="60" y="190" width="180" height="70" as="geometry" />
+        </mxCell>
+
+        <mxCell id="10" value="规划" style="swimlane;startSize=32;fillColor=#f5f5f5;strokeColor=#9e9e9e;fontStyle=1;pointerEvents=0;" vertex="1" parent="1">
+          <mxGeometry x="740" y="140" width="300" height="300" as="geometry" />
+        </mxCell>
+        <mxCell id="11" value="选择资料策略&#xa;平台内容 / 个人资料 / 探索" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="10">
+          <mxGeometry x="40" y="70" width="220" height="80" as="geometry" />
+        </mxCell>
+        <mxCell id="12" value="Agent 提案 → 校验 → 用户发布" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;" vertex="1" parent="10">
+          <mxGeometry x="40" y="190" width="220" height="70" as="geometry" />
+        </mxCell>
+
+        <mxCell id="13" value="执行与验收" style="swimlane;startSize=32;fillColor=#f5f5f5;strokeColor=#9e9e9e;fontStyle=1;pointerEvents=0;" vertex="1" parent="1">
+          <mxGeometry x="1090" y="140" width="350" height="520" as="geometry" />
+        </mxCell>
+        <mxCell id="14" value="今日活动&#xa;学习资料 / 练习 / 项目里程碑" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="13">
+          <mxGeometry x="60" y="70" width="230" height="80" as="geometry" />
+        </mxCell>
+        <mxCell id="15" value="提交学习证据" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="13">
+          <mxGeometry x="85" y="200" width="180" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="16" value="是否通过验收？&#xa;未通过则返回补强" style="rhombus;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;" vertex="1" parent="13">
+          <mxGeometry x="75" y="310" width="200" height="100" as="geometry" />
+        </mxCell>
+        <mxCell id="17" value="通过后才统一标记完成" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;" vertex="1" parent="13">
+          <mxGeometry x="70" y="440" width="210" height="60" as="geometry" />
+        </mxCell>
+
+        <mxCell id="18" value="反馈与调整" style="swimlane;startSize=32;fillColor=#f5f5f5;strokeColor=#9e9e9e;fontStyle=1;pointerEvents=0;" vertex="1" parent="1">
+          <mxGeometry x="1090" y="720" width="350" height="360" as="geometry" />
+        </mxCell>
+        <mxCell id="19" value="同一份证据更新掌握度&#xa;并记录错因 / 项目成果" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;" vertex="1" parent="18">
+          <mxGeometry x="55" y="70" width="240" height="80" as="geometry" />
+        </mxCell>
+        <mxCell id="20" value="系统提出下一步&#xa;继续 / 补强 / 改期 / 优化计划" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;" vertex="1" parent="18">
+          <mxGeometry x="50" y="210" width="250" height="80" as="geometry" />
+        </mxCell>
+
+        <mxCell id="21" value="目标收口" style="swimlane;startSize=32;fillColor=#f5f5f5;strokeColor=#9e9e9e;fontStyle=1;pointerEvents=0;" vertex="1" parent="1">
+          <mxGeometry x="1490" y="140" width="260" height="520" as="geometry" />
+        </mxCell>
+        <mxCell id="22" value="所有必需活动通过" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;" vertex="1" parent="21">
+          <mxGeometry x="40" y="90" width="180" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="23" value="逐项确认成功标准" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="21">
+          <mxGeometry x="40" y="220" width="180" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="24" value="完成目标 + 复盘报告" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontStyle=1;" vertex="1" parent="21">
+          <mxGeometry x="30" y="360" width="200" height="70" as="geometry" />
+        </mxCell>
+
+        <mxCell id="30" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=0.5;exitY=1;entryX=0.5;entryY=0;" edge="1" parent="4" source="5" target="6"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="31" value="建立目标" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=1;exitY=0.5;entryX=0;entryY=0.5;" edge="1" parent="1" source="5" target="8"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="32" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=0.5;exitY=1;entryX=0.5;entryY=0;" edge="1" parent="7" source="8" target="9"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="33" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=1;exitY=0.5;entryX=0;entryY=0.5;" edge="1" parent="1" source="8" target="11"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="34" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=0.5;exitY=1;entryX=0.5;entryY=0;" edge="1" parent="10" source="11" target="12"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="35" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=1;exitY=0.5;entryX=0;entryY=0.5;" edge="1" parent="1" source="12" target="14"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="36" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=0.5;exitY=1;entryX=0.5;entryY=0;" edge="1" parent="13" source="14" target="15"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="37" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=0.5;exitY=1;entryX=0.5;entryY=0;" edge="1" parent="13" source="15" target="16"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="38" value="是" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=0.5;exitY=1;entryX=0.5;entryY=0;strokeColor=#82b366;" edge="1" parent="13" source="16" target="17"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="40" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=0.5;exitY=1;entryX=0.5;entryY=0;" edge="1" parent="1" source="17" target="19"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="41" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=0.5;exitY=1;entryX=0.5;entryY=0;" edge="1" parent="18" source="19" target="20"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="43" value="目标条件满足" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=1;exitY=0.5;entryX=0;entryY=0.5;" edge="1" parent="1" source="17" target="22"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="44" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=0.5;exitY=1;entryX=0.5;entryY=0;" edge="1" parent="21" source="22" target="23"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="45" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;exitX=0.5;exitY=1;entryX=0.5;entryY=0;" edge="1" parent="21" source="23" target="24"><mxGeometry relative="1" as="geometry" /></mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

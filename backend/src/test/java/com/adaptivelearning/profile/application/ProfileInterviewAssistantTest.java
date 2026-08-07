@@ -131,6 +131,68 @@ class ProfileInterviewAssistantTest {
     }
 
     @Test
+    void weeklyDayCountClearsInventedFullWeekAndAsksForSpecificDays() {
+        AiModelClient model = mock(AiModelClient.class);
+        when(model.isConfigured()).thenReturn(true);
+        when(model.complete(anyString(), anyString())).thenReturn(new AiModelClient.Completion("""
+                {"assistantMessage":"已按一周七天设置完成。","updates":{
+                  "directionQuery":null,"currentStage":null,
+                  "planStartDate":null,"planEndDate":null,"planPeriodDays":null,
+                  "availability":[
+                    {"weekday":1,"start":"19:00","end":"21:00","energyLevel":"MEDIUM"},
+                    {"weekday":2,"start":"19:00","end":"21:00","energyLevel":"MEDIUM"},
+                    {"weekday":3,"start":"19:00","end":"21:00","energyLevel":"MEDIUM"},
+                    {"weekday":4,"start":"19:00","end":"21:00","energyLevel":"MEDIUM"},
+                    {"weekday":5,"start":"19:00","end":"21:00","energyLevel":"MEDIUM"},
+                    {"weekday":6,"start":"19:00","end":"21:00","energyLevel":"MEDIUM"},
+                    {"weekday":7,"start":"19:00","end":"21:00","energyLevel":"MEDIUM"}]}}
+                """, 10, 20, 30));
+        ObjectMapper json = new ObjectMapper().registerModule(new JavaTimeModule());
+        ProfileInterviewAssistant assistant = new ProfileInterviewAssistant(
+                model, mock(RedisRateLimiter.class), json, mock(ModelRunService.class));
+        List<SlotDraft> oldFullWeek = java.util.stream.IntStream.rangeClosed(1, 7)
+                .mapToObj(day -> new SlotDraft(day, java.time.LocalTime.of(19, 0),
+                        java.time.LocalTime.of(21, 0), "MEDIUM"))
+                .toList();
+        Draft initial = new Draft("Asia/Shanghai", 1, java.time.LocalDate.of(2026, 8, 1),
+                java.time.LocalDate.of(2026, 10, 31), 101L, "Java 后端开发", null, "BEGINNER", null,
+                new PreferenceDraft(List.of("TEXT"), "SOCRATIC", "MEDIUM", 45,
+                        new BigDecimal("0.85"), 1, 4, Map.of()), oldFullWeek, Map.of());
+
+        AssistantTurn turn = assistant.respond(
+                1, initial, List.of(), "我改成一周学习三天，每次两小时", List.of());
+
+        assertThat(turn.draft().availability()).isEmpty();
+        assertThat(turn.assistantMessage()).contains("请选择具体星期几");
+        assertThat(turn.assistantMessage()).doesNotContain("一周七天");
+    }
+
+    @Test
+    void incompleteDraftCannotClaimItIsReadyOrAskForChatConfirmation() {
+        AiModelClient model = mock(AiModelClient.class);
+        when(model.isConfigured()).thenReturn(true);
+        when(model.complete(anyString(), anyString())).thenReturn(new AiModelClient.Completion("""
+                {"assistantMessage":"画像草稿已经完整，请回复确认保存。","updates":{
+                  "directionQuery":null,"currentStage":null,
+                  "planStartDate":null,"planEndDate":null,"planPeriodDays":null,
+                  "availability":null}}
+                """, 10, 20, 30));
+        ObjectMapper json = new ObjectMapper().registerModule(new JavaTimeModule());
+        ProfileInterviewAssistant assistant = new ProfileInterviewAssistant(
+                model, mock(RedisRateLimiter.class), json, mock(ModelRunService.class));
+        Draft initial = new Draft("Asia/Shanghai", 1, java.time.LocalDate.of(2026, 7, 31),
+                java.time.LocalDate.of(2026, 8, 6), null, "心理学", "心理学", "BEGINNER", null,
+                new PreferenceDraft(List.of("TEXT", "PRACTICE"), "SOCRATIC", "MEDIUM", 45,
+                        new BigDecimal("0.85"), 1, 4, Map.of()), List.of(), Map.of());
+
+        AssistantTurn turn = assistant.respond(1, initial, List.of(), "保存", List.of());
+
+        assertThat(turn.assistantMessage()).contains("每周", "时间");
+        assertThat(turn.assistantMessage()).doesNotContain("草稿已经完整", "回复确认保存");
+        assertThat(turn.draft().availability()).isEmpty();
+    }
+
+    @Test
     void projectsOnlyAssistantTextAcrossArbitraryJsonChunks() {
         List<String> deltas = new ArrayList<>();
         ProfileInterviewAssistant.AssistantMessageProjector projector =

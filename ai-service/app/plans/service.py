@@ -1,41 +1,86 @@
 from __future__ import annotations
 
+import asyncio
 import json
+import logging
 from typing import Any
 
 from pydantic import ValidationError
 
 from app.core.errors import ServiceError
 from app.model.schemas import ModelClient
-from app.plans.prompts import PLAN_RECOMMENDATION_PROMPT_VERSION, PLAN_RECOMMENDATION_SYSTEM_PROMPT
+from app.plans.prompts import (
+    PLAN_RECOMMENDATION_PROMPT_VERSION,
+    PLAN_RECOMMENDATION_SYSTEM_PROMPT,
+    PLAN_USER_TEMPLATE,
+)
 from app.plans.schemas import (
     PlanRecommendationCompleted,
     PlanRecommendationModelOutput,
     PlanRecommendationRequest,
     PlanTaskItem,
 )
+from app.prompts.manager import PromptManager, ResolvedPrompt
+from app.rag.retrieval import RagRetrievalService
+from app.rag.schemas import SearchRequest
+
+logger = logging.getLogger(__name__)
 
 
 class PlanRecommendationAiService:
-    def __init__(self, model_client: ModelClient) -> None:
+    _TRANSIENT_ERRORS = {"AI_PROVIDER_ERROR", "AI_MODEL_TIMEOUT"}
+    _MAX_ATTEMPTS = 3
+    _RETRY_BACKOFF_SECONDS = 0.8
+
+    def __init__(
+        self,
+        model_client: ModelClient,
+        retrieval: RagRetrievalService | None = None,
+        prompts: PromptManager | None = None,
+    ) -> None:
         self._model = model_client
+        self._retrieval = retrieval
+        self._prompts = prompts
+
+    async def _resolve_prompt(
+        self,
+        code: str,
+        fallback_content: str,
+        fallback_version: str,
+    ) -> ResolvedPrompt:
+        if self._prompts is None:
+            return ResolvedPrompt(fallback_content, fallback_version)
+        return await self._prompts.get_prompt(code, fallback_content, fallback_version)
 
     async def recommend(self, request: PlanRecommendationRequest) -> PlanRecommendationCompleted:
+        prompt = await self._resolve_prompt(
+            "PLAN_RECOMMENDATION",
+            PLAN_RECOMMENDATION_SYSTEM_PROMPT,
+            PLAN_RECOMMENDATION_PROMPT_VERSION,
+        )
+        evidence = await self._knowledge_evidence(request)
+        allowed_chunk_ids = {int(item["chunkId"]) for item in evidence}
         last_error: ServiceError | None = None
-        for attempt in range(3):
+        for attempt in range(self._MAX_ATTEMPTS):
             try:
                 if not self._model.configured:
                     raise ServiceError("AI_DEPENDENCY_UNAVAILABLE", "AI 模型服务未配置，无法生成学习计划")
                 completion = await self._model.complete(
-                    PLAN_RECOMMENDATION_SYSTEM_PROMPT,
-                    self._user_prompt(request),
-                    max_output_tokens=1800,
+                    prompt.content,
+                    self._user_prompt(request, evidence),
+                    max_output_tokens=4000,
                 )
                 output = self._parse(completion.content)
                 allowed_ids = {item.id for item in request.knowledge_points}
                 normalized: list[PlanTaskItem] = []
                 for item in output.tasks[: request.count]:
-                    criteria = list(dict.fromkeys(text.strip() for text in item.acceptance_criteria if text.strip()))
+                    criteria = list(
+                        dict.fromkeys(
+                            text.strip()
+                            for text in item.acceptance_criteria
+                            if text.strip()
+                        )
+                    )
                     if not criteria:
                         raise ServiceError("AI_OUTPUT_INVALID", "学习任务缺少可验收结果")
                     kp_ids: list[int] = []
@@ -57,12 +102,25 @@ class PlanRecommendationAiService:
                                 except (TypeError, ValueError):
                                     pass
                     kp_ids = list(dict.fromkeys(kp_ids))[:10]
+                    source_ids = list(
+                        dict.fromkeys(
+                            chunk_id
+                            for chunk_id in item.source_chunk_ids
+                            if chunk_id in allowed_chunk_ids
+                        )
+                    )[:12]
+                    if request.allowed_space_ids and not source_ids:
+                        raise ServiceError("AI_OUTPUT_INVALID", "知识库计划任务缺少有效资料引用")
                     normalized.append(
                         item.model_copy(
                             update={
                                 "acceptance_criteria": criteria[:5],
                                 "knowledge_point_ids": kp_ids[:10],
+                                "source_chunk_ids": source_ids,
                                 "estimated_minutes": max(15, min(item.estimated_minutes, 180)),
+                                "source_queries": list(dict.fromkeys(
+                                    query.strip() for query in item.source_queries if query.strip()
+                                ))[:8],
                             }
                         )
                     )
@@ -70,18 +128,126 @@ class PlanRecommendationAiService:
                     raise ServiceError("AI_OUTPUT_INVALID", "模型未返回学习任务")
                 return PlanRecommendationCompleted(
                     tasks=normalized,
-                    prompt_version=PLAN_RECOMMENDATION_PROMPT_VERSION,
-                    model_run=self._model_run(completion),
+                    prompt_version=prompt.version,
+                    model_run=self._model_run(completion, prompt.version),
                 )
             except ServiceError as error:
-                if error.code in ("AI_OUTPUT_INVALID", "AI_DEPENDENCY_UNAVAILABLE") and attempt < 2:
+                should_retry = error.code in ("AI_OUTPUT_INVALID", "AI_DEPENDENCY_UNAVAILABLE")
+                should_retry = should_retry or (error.code in self._TRANSIENT_ERRORS and error.retryable)
+                if should_retry and attempt < self._MAX_ATTEMPTS - 1:
                     last_error = error
+                    logger.warning(
+                        "plan generation attempt %s/%s failed (code=%s, message=%s), retrying",
+                        attempt + 1,
+                        self._MAX_ATTEMPTS,
+                        error.code,
+                        error.message,
+                    )
+                    await asyncio.sleep(self._RETRY_BACKOFF_SECONDS * (attempt + 1))
                     continue
                 raise
         raise last_error or ServiceError("AI_OUTPUT_INVALID", "模型未返回学习任务")
 
-    def _user_prompt(self, request: PlanRecommendationRequest) -> str:
-        knowledge = ", ".join(item.name for item in request.knowledge_points) or "（无指定知识点，请按方向自行规划核心内容）"
+    async def _knowledge_evidence(
+        self, request: PlanRecommendationRequest
+    ) -> list[dict[str, Any]]:
+        if not request.allowed_space_ids:
+            return []
+        if self._retrieval is None:
+            raise ServiceError("AI_DEPENDENCY_UNAVAILABLE", "知识库检索服务未配置")
+        base = " ".join(
+            value
+            for value in (
+                request.goal_name,
+                request.direction_name,
+                request.current_stage,
+                request.user_requirement or "",
+                request.background_text or "",
+            )
+            if value
+        )
+        queries = [
+            base,
+            f"{request.direction_name} 目录 章节 核心概念 基础 前置知识",
+            f"{request.goal_name} 练习 案例 复习 测验 可验收成果",
+        ]
+        results = await asyncio.gather(
+            *[
+                self._retrieval.search(
+                    SearchRequest(
+                        user_id=request.user_id,
+                        query=query[:2000],
+                        allowed_space_ids=request.allowed_space_ids,
+                        allowed_document_version_ids=request.allowed_document_version_ids,
+                        top_k=request.knowledge_top_k,
+                        candidate_k=max(40, request.knowledge_top_k * 3),
+                    )
+                )
+                for query in queries
+            ]
+        )
+        unique: dict[int, Any] = {}
+        for result in results:
+            for hit in result.hits:
+                previous = unique.get(hit.chunk_id)
+                if previous is None or hit.score > previous.score:
+                    unique[hit.chunk_id] = hit
+        hits = sorted(unique.values(), key=lambda item: item.score, reverse=True)[:30]
+        if not hits:
+            raise ServiceError(
+                "AI_EVIDENCE_INSUFFICIENT",
+                "所选知识库没有检索到可用于规划的内容",
+                status_code=422,
+            )
+        return [
+            {
+                "citationId": hit.citation_id,
+                "chunkId": hit.chunk_id,
+                "documentId": hit.document_id,
+                "documentVersionId": hit.document_version_id,
+                "titlePath": hit.title_path,
+                "pageFrom": hit.page_from,
+                "pageTo": hit.page_to,
+                "content": hit.quote_preview,
+            }
+            for hit in hits
+        ]
+
+    def _user_prompt(
+        self, request: PlanRecommendationRequest, evidence: list[dict[str, Any]]
+    ) -> str:
+        knowledge = ", ".join(item.name for item in request.knowledge_points) or (
+            "（无指定知识点，请按方向自行规划核心内容）"
+        )
+        evidence_json = (
+            json.dumps(evidence, ensure_ascii=False)
+            if evidence
+            else "（未选择知识库，按目标、画像与知识点规划）"
+        )
+        extra: list[str] = []
+        if request.background_text:
+            extra.append(f"背景：{request.background_text}\n")
+        if request.user_requirement:
+            extra.append(f"用户的节奏要求：{request.user_requirement}\n")
+        if request.exploration_mode:
+            extra.append(
+                "这是自定义方向，处于探索阶段：先划定知识边界和资料检索词；"
+                "不要假装已有权威资料，sourceQueries 必须给出可执行检索建议。\n"
+            )
+        extra_lines = "".join(extra)
+        if PLAN_USER_TEMPLATE is not None:
+            return str(PLAN_USER_TEMPLATE.format(
+                goal_name=request.goal_name,
+                direction_name=request.direction_name,
+                current_stage=request.current_stage,
+                plan_start_date=request.plan_start_date,
+                plan_end_date=request.plan_end_date,
+                weekly_available_minutes=request.weekly_available_minutes,
+                count=request.count,
+                knowledge=knowledge,
+                extra_lines=extra_lines,
+                knowledge_evidence=evidence_json,
+            ))
         parts = [
             f"目标：{request.goal_name}",
             f"方向：{request.direction_name}",
@@ -89,7 +255,9 @@ class PlanRecommendationAiService:
             f"计划周期：{request.plan_start_date} 至 {request.plan_end_date}",
             f"每周可用学习时间：{request.weekly_available_minutes} 分钟",
             f"需要生成的任务数量：{request.count}",
+            f"自定义方向探索模式：{request.exploration_mode}",
             f"可选知识点：{knowledge}",
+            f"<knowledgeEvidence>\n{evidence_json}\n</knowledgeEvidence>",
         ]
         if request.background_text:
             parts.append(f"背景：{request.background_text}")
@@ -118,16 +286,22 @@ class PlanRecommendationAiService:
                 status_code=422,
                 details={
                     "validationErrors": len(error.errors()),
-                    "fields": [{"loc": ".".join(str(p) for p in e.get("loc", ())), "msg": e.get("msg", "")} for e in error.errors()[:10]],
+                    "fields": [
+                        {
+                            "loc": ".".join(str(p) for p in e.get("loc", ())),
+                            "msg": e.get("msg", ""),
+                        }
+                        for e in error.errors()[:10]
+                    ],
                 },
             ) from error
 
     @staticmethod
-    def _model_run(completion: Any) -> dict[str, Any]:
+    def _model_run(completion: Any, prompt_version: str) -> dict[str, Any]:
         return {
             "model": completion.model,
             "provider": completion.provider,
-            "promptVersion": PLAN_RECOMMENDATION_PROMPT_VERSION,
+            "promptVersion": prompt_version,
             "promptTokens": completion.prompt_tokens,
             "completionTokens": completion.completion_tokens,
             "latencyMs": completion.latency_ms,

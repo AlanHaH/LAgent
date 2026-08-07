@@ -148,13 +148,17 @@ public class AuthService {
         if (user == null || !"ACTIVE".equals(user.getStatus()) || user.getEmailVerifiedAt() == null) {
             throw new BusinessException(ErrorCode.AUTH_UNAUTHENTICATED, "账号不可用");
         }
-        old.setRevokedAt(Instant.now());
-        tokenMapper.updateById(old);
+        Instant revokedAt = Instant.now();
+        if (tokenMapper.revokeIfActive(old.getId(), old.getVersion(), revokedAt) != 1) {
+            throw new BusinessException(ErrorCode.AUTH_TOKEN_EXPIRED, "刷新令牌已经被使用");
+        }
         TokenPair pair = issuePair(user, deviceId == null ? old.getDeviceId() : deviceId);
         RefreshTokenEntity replacement = tokenMapper.selectOne(new LambdaQueryWrapper<RefreshTokenEntity>()
                 .eq(RefreshTokenEntity::getTokenHash, hashingService.sha256(pair.refreshToken())));
-        old.setRotatedToId(replacement.getId());
-        tokenMapper.updateById(old);
+        if (replacement == null || tokenMapper.linkReplacement(old.getId(), old.getVersion() + 1,
+                replacement.getId()) != 1) {
+            throw new BusinessException(ErrorCode.RESOURCE_VERSION_CONFLICT, "刷新令牌轮换冲突，请重新登录");
+        }
         return pair;
     }
 

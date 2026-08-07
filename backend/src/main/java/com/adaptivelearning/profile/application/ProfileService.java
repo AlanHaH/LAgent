@@ -15,14 +15,21 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JavaType;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
+import org.springframework.transaction.support.TransactionTemplate;
 
 import java.math.BigDecimal;
 import java.time.*;
 import java.time.temporal.ChronoUnit;
 import java.util.*;
+import java.util.concurrent.Executor;
 
 @Service
 @RequiredArgsConstructor
@@ -42,13 +49,16 @@ public class ProfileService {
     private final ObjectMapper objectMapper;
     private final AuditService audit;
     private final PythonAiServiceClient pythonAi;
+    private final PlatformTransactionManager transactionManager;
+    @Autowired @Qualifier("aiBackgroundExecutor")
+    private Executor aiBackgroundExecutor;
 
     public record DirectionInput(Long directionId, String customDirection, String currentStage, boolean primary) {}
     public record ProfileInput(String timezone, int weekStart, Integer planPeriodDays,
                                LocalDate planStartDate, LocalDate planEndDate, String backgroundText,
                                List<DirectionInput> directions, Integer version) {}
     public record DirectionView(Long directionId, String name, String customDirection, String sourceType,
-                                String currentStage, boolean primary) {}
+                                boolean knowledgeBaseDirection, String currentStage, boolean primary) {}
     public record ProfileView(String timezone, int weekStart, int planPeriodDays,
                               LocalDate planStartDate, LocalDate planEndDate, String backgroundText,
                               String status, int currentVersionNo, int version, List<DirectionView> directions,
@@ -67,7 +77,8 @@ public class ProfileService {
                 .eq(ProfileDirectionEntity::getProfileId, profile.getId()));
         List<DirectionView> views = dirs.stream().map(d -> new DirectionView(d.getDirectionId(),
                 d.getDirectionId() == null ? null : directionName(d.getDirectionId()), d.getCustomDirection(),
-                d.getSourceType(), d.getCurrentStage(), Boolean.TRUE.equals(d.getIsPrimary()))).toList();
+                d.getSourceType(), d.getDirectionId() != null, d.getCurrentStage(),
+                Boolean.TRUE.equals(d.getIsPrimary()))).toList();
         return new ProfileView(profile.getTimezone(), profile.getWeekStart(), profile.getPlanPeriodDays(),
                 profile.getPlanStartDate(), profile.getPlanEndDate(), profile.getBackgroundText(),
                 profile.getProfileStatus(), profile.getCurrentVersionNo(),
@@ -109,8 +120,11 @@ public class ProfileService {
             entity.setStatus("ACTIVE");
             directionMapper.insert(entity);
         }
+        long knowledgeBaseDirections = input.directions().stream()
+                .filter(item -> item.directionId() != null).count();
         audit.record(create ? "PROFILE_CREATE" : "PROFILE_UPDATE", "USER_PROFILE", profile.getId().toString(),
-                null, "timezone=" + profile.getTimezone() + ",directions=" + input.directions().size(), "SUCCESS");
+                null, "timezone=" + profile.getTimezone() + ",directions=" + input.directions().size()
+                        + ",knowledgeBaseDirections=" + knowledgeBaseDirections, "SUCCESS");
         return get();
     }
 
@@ -205,13 +219,51 @@ public class ProfileService {
         return entity;
     }
 
-    @Transactional
+    public List<SelfAssessmentEntity> selfAssessments() {
+        return selfAssessmentMapper.selectList(new LambdaQueryWrapper<SelfAssessmentEntity>()
+                .eq(SelfAssessmentEntity::getUserId, SecurityUtils.currentUserId())
+                .orderByDesc(SelfAssessmentEntity::getAssessedAt));
+    }
+
     public ProfileGenerationJobEntity generate() {
-        UserProfileEntity profile = findProfile();
+        return generate("USER_REQUEST");
+    }
+
+    public ProfileGenerationJobEntity generate(String triggerType) {
+        if (!Set.of("USER_REQUEST", "INTERVIEW_CONFIRM", "MANUAL_SAVE").contains(triggerType)) {
+            throw new BusinessException(ErrorCode.COMMON_VALIDATION_ERROR, "画像版本触发类型不合法");
+        }
+        long userId = SecurityUtils.currentUserId();
+        UserProfileEntity profile = findProfile(userId);
         if (profile == null) throw new BusinessException(ErrorCode.COMMON_VALIDATION_ERROR, "画像基本信息尚未填写");
         ProfileGenerationJobEntity job = new ProfileGenerationJobEntity();
-        job.setPublicId(UUID.randomUUID().toString()); job.setUserId(SecurityUtils.currentUserId());
-        job.setStatus("RUNNING"); job.setCreatedAt(Instant.now()); jobMapper.insert(job);
+        job.setPublicId(UUID.randomUUID().toString()); job.setUserId(userId);
+        job.setStatus("QUEUED"); job.setCreatedAt(Instant.now()); jobMapper.insert(job);
+        Runnable submit = () -> queueProfileGeneration(job.getId(), userId, triggerType);
+        if (TransactionSynchronizationManager.isActualTransactionActive()) {
+            TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+                @Override public void afterCommit() { submit.run(); }
+            });
+        } else submit.run();
+        return job;
+    }
+
+    private void queueProfileGeneration(long jobId, long userId, String triggerType) {
+        try {
+            aiBackgroundExecutor.execute(() -> runProfileGeneration(jobId, userId, triggerType));
+        } catch (RuntimeException rejected) {
+            failProfileGeneration(jobId, "SERVICE_TEMPORARILY_UNAVAILABLE");
+        }
+    }
+
+    private void runProfileGeneration(long jobId, long userId, String triggerType) {
+        ProfileGenerationJobEntity job = jobMapper.selectById(jobId);
+        if (job == null || !"QUEUED".equals(job.getStatus())) return;
+        job.setStatus("RUNNING");
+        jobMapper.updateById(job);
+        try {
+        UserProfileEntity profile = findProfile(userId);
+        if (profile == null) throw new IllegalStateException("profile disappeared");
         List<SelfAssessmentEntity> assessments = selfAssessmentMapper.selectList(new LambdaQueryWrapper<SelfAssessmentEntity>()
                 .eq(SelfAssessmentEntity::getUserId, profile.getUserId()));
         List<ProfileDirectionEntity> generatedDirections = directionMapper.selectList(
@@ -219,12 +271,13 @@ public class ProfileService {
                         .eq(ProfileDirectionEntity::getProfileId, profile.getId())
                         .eq(ProfileDirectionEntity::getStatus, "ACTIVE")
                         .orderByDesc(ProfileDirectionEntity::getIsPrimary));
-        PreferenceView generatedPreference = preferenceView();
+        PreferenceView generatedPreference = preferenceView(userId);
         int weeklyAvailableMinutes = ruleMapper.selectList(new LambdaQueryWrapper<AvailabilityRuleEntity>()
                         .eq(AvailabilityRuleEntity::getUserId, profile.getUserId())).stream()
                 .mapToInt(AvailabilityRuleEntity::getAvailableMinutes).sum();
-        if (!pythonAi.isConfigured()) throw new AiModelException(ErrorCode.SERVICE_TEMPORARILY_UNAVAILABLE);
-        ProfileAnalysis analysis = generateProfileAnalysis(profile, generatedDirections, generatedPreference, weeklyAvailableMinutes, assessments.size());
+        ProfileAnalysis analysis = pythonAi.isConfigured()
+                ? generateProfileAnalysis(profile, generatedDirections, generatedPreference, weeklyAvailableMinutes, assessments.size())
+                : fallbackProfileAnalysis(generatedDirections, generatedPreference, weeklyAvailableMinutes, assessments.size());
         BigDecimal confidence = analysis.confidence();
         Map<String, Object> snapshot = new LinkedHashMap<>();
         snapshot.put("timezone", profile.getTimezone()); snapshot.put("generatedAt", Instant.now());
@@ -235,6 +288,8 @@ public class ProfileService {
             item.put("directionId", direction.getDirectionId());
             item.put("name", direction.getDirectionId() == null ? direction.getCustomDirection()
                     : directionName(direction.getDirectionId()));
+            item.put("sourceType", direction.getSourceType());
+            item.put("knowledgeBaseDirection", direction.getDirectionId() != null);
             item.put("currentStage", direction.getCurrentStage());
             item.put("primary", Boolean.TRUE.equals(direction.getIsPrimary()));
             return item;
@@ -245,14 +300,30 @@ public class ProfileService {
         snapshot.put("confidence", confidence); snapshot.put("recommendedDifficulty", analysis.difficulty());
         snapshot.put("dailyRecommendedTasks", analysis.dailyTasks());
         snapshot.put("riskNotices", analysis.riskNotices());
-        ProfileVersionEntity version = new ProfileVersionEntity();
-        version.setProfileId(profile.getId()); version.setVersionNo(profile.getCurrentVersionNo() + 1);
-        version.setSnapshotJson(json(snapshot)); version.setConfidence(confidence); version.setTriggerType("USER_REQUEST");
-        version.setTriggerEventId(job.getPublicId()); version.setCreatedAt(Instant.now()); version.setCreatedBy(profile.getUserId());
-        versionMapper.insert(version);
-        profile.setCurrentVersionNo(version.getVersionNo()); profile.setProfileStatus("GENERATED"); profileMapper.updateById(profile);
-        job.setProfileVersionId(version.getId()); job.setStatus("SUCCEEDED"); job.setFinishedAt(Instant.now()); jobMapper.updateById(job);
-        return job;
+        new TransactionTemplate(transactionManager).executeWithoutResult(status -> {
+            UserProfileEntity current = profileMapper.selectById(profile.getId());
+            ProfileVersionEntity version = new ProfileVersionEntity();
+            version.setProfileId(current.getId()); version.setVersionNo(current.getCurrentVersionNo() + 1);
+            version.setSnapshotJson(json(snapshot)); version.setConfidence(confidence); version.setTriggerType(triggerType);
+            version.setTriggerEventId(job.getPublicId()); version.setCreatedAt(Instant.now()); version.setCreatedBy(userId);
+            versionMapper.insert(version);
+            current.setCurrentVersionNo(version.getVersionNo()); current.setProfileStatus("GENERATED");
+            profileMapper.updateById(current);
+            job.setProfileVersionId(version.getId()); job.setStatus("SUCCEEDED"); job.setFinishedAt(Instant.now());
+            job.setErrorCode(null); jobMapper.updateById(job);
+        });
+        } catch (Exception error) {
+            String code = error instanceof AiModelException modelError
+                    ? modelError.getCode().name() : "PROFILE_GENERATION_FAILED";
+            failProfileGeneration(jobId, code);
+        }
+    }
+
+    private void failProfileGeneration(long jobId, String code) {
+        ProfileGenerationJobEntity failed = jobMapper.selectById(jobId);
+        if (failed == null) return;
+        failed.setStatus("FAILED"); failed.setErrorCode(code); failed.setFinishedAt(Instant.now());
+        jobMapper.updateById(failed);
     }
 
     private record ProfileAnalysis(BigDecimal confidence, int difficulty, int dailyTasks, List<String> riskNotices) {}
@@ -285,8 +356,27 @@ public class ProfileService {
             if (riskNotices.isEmpty()) riskNotices.add("建议补充诊断或自评证据以提升画像置信度");
             return new ProfileAnalysis(confidence, difficulty, dailyTasks, List.copyOf(riskNotices));
         } catch (Exception e) {
-            throw new AiModelException(ErrorCode.MODEL_PROVIDER_ERROR, e);
+            return fallbackProfileAnalysis(directions, preference, weeklyMinutes, assessmentCount);
         }
+    }
+
+    private ProfileAnalysis fallbackProfileAnalysis(List<ProfileDirectionEntity> directions,
+                                                    PreferenceView preference,
+                                                    int weeklyMinutes,
+                                                    int assessmentCount) {
+        BigDecimal confidence = new BigDecimal("0.35")
+                .add(BigDecimal.valueOf(Math.min(assessmentCount, 5)).multiply(new BigDecimal("0.08")))
+                .add(directions.isEmpty() ? BigDecimal.ZERO : new BigDecimal("0.15"));
+        if (confidence.compareTo(BigDecimal.ONE) > 0) confidence = BigDecimal.ONE;
+        String stage = directions.isEmpty() ? "BEGINNER" : directions.get(0).getCurrentStage();
+        int difficulty = "ADVANCED".equals(stage) ? 4 : "INTERMEDIATE".equals(stage) ? 3 : 2;
+        int focusMinutes = preference == null ? 45 : preference.focusMinutes();
+        int dailyTasks = Math.max(1, Math.min(4, weeklyMinutes / Math.max(1, focusMinutes * 5)));
+        List<String> risks = new ArrayList<>();
+        if (assessmentCount == 0) risks.add("当前缺少诊断或自评证据，建议先完成一次基础测验");
+        if (weeklyMinutes < 120) risks.add("每周可用时间较少，建议优先完成核心任务");
+        if (risks.isEmpty()) risks.add("画像基于当前信息生成，后续会随学习证据持续更新");
+        return new ProfileAnalysis(confidence, difficulty, dailyTasks, List.copyOf(risks));
     }
 
     public ProfileGenerationJobEntity getJob(String publicId) {
@@ -305,8 +395,12 @@ public class ProfileService {
     }
 
     private UserProfileEntity findProfile() {
+        return findProfile(SecurityUtils.currentUserId());
+    }
+
+    private UserProfileEntity findProfile(long userId) {
         return profileMapper.selectOne(new LambdaQueryWrapper<UserProfileEntity>()
-                .eq(UserProfileEntity::getUserId, SecurityUtils.currentUserId()));
+                .eq(UserProfileEntity::getUserId, userId));
     }
 
     private void markProfileDraft(long userId) {
@@ -316,8 +410,12 @@ public class ProfileService {
     }
 
     private PreferenceView preferenceView() {
+        return preferenceView(SecurityUtils.currentUserId());
+    }
+
+    private PreferenceView preferenceView(long userId) {
         LearningPreferenceEntity p = preferenceMapper.selectOne(new LambdaQueryWrapper<LearningPreferenceEntity>()
-                .eq(LearningPreferenceEntity::getUserId, SecurityUtils.currentUserId()));
+                .eq(LearningPreferenceEntity::getUserId, userId));
         if (p == null) return null;
         try {
             List<String> contentModes = normalizeStoredContentModes(readJson(p.getContentModesJson(),

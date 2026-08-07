@@ -1,0 +1,163 @@
+{
+  "direction": "LR",
+  "nodes": [
+    {
+      "id": "vue_learner",
+      "label": "Vue 学习端\n总览｜画像｜目标｜计划｜任务｜知识库｜问答｜评估｜分析｜设置",
+      "group": "frontend",
+      "groupLabel": "Vue 3 前端",
+      "width": 300,
+      "height": 90
+    },
+    {
+      "id": "vue_admin",
+      "label": "Vue 管理端\n用户/角色｜目录/知识点｜题库｜模型/提示词｜审计/指标",
+      "group": "frontend",
+      "width": 300,
+      "height": 90
+    },
+    {
+      "id": "auth",
+      "label": "账户、权限与安全\n注册/登录/刷新/找回密码/RBAC\nsys_user｜sys_role｜sys_permission\nsys_user_role｜sys_role_permission｜refresh_token",
+      "group": "backend/support",
+      "groupLabel": "Spring Boot 模块化单体",
+      "width": 330,
+      "height": 145
+    },
+    {
+      "id": "profile",
+      "label": "学习画像\nAI访谈、偏好、可用时间、自评、版本快照\nuser_profile｜user_profile_direction｜profile_version\nlearning_preference｜availability_rule｜availability_exception\nself_assessment｜profile_generation_job\nprofile_interview_session｜profile_interview_message",
+      "group": "backend/learning_loop",
+      "width": 360,
+      "height": 210
+    },
+    {
+      "id": "goal",
+      "label": "目标与项目\nAI目标推荐、目标状态机、项目、里程碑\nlearning_goal｜goal_recommendation_batch\nlearning_project｜goal_project｜milestone",
+      "group": "backend/learning_loop",
+      "width": 330,
+      "height": 145
+    },
+    {
+      "id": "planning",
+      "label": "Agent 计划\n候选生成、规则排期、校验、确认、发布、人工优化\nlearning_plan｜planning_job｜plan_version｜plan_stage\nplan_change_item｜plan_validation_result｜plan_confirmation\nplan_publication｜optimization_request｜idempotency_record｜outbox_event",
+      "group": "backend/learning_loop",
+      "width": 370,
+      "height": 220
+    },
+    {
+      "id": "execution",
+      "label": "任务执行与辅导\n任务状态机、依赖、计时、笔记、总结、AI辅导\nlearning_task｜task_dependency｜task_knowledge_point\ntask_knowledge_source｜task_status_history｜task_schedule_history\nstudy_session｜study_session_pause｜study_note｜study_note_version\ntask_completion_summary｜tutoring_session｜tutoring_message",
+      "group": "backend/learning_loop",
+      "width": 390,
+      "height": 235
+    },
+    {
+      "id": "knowledge",
+      "label": "知识库与 RAG\n文件上传、解析切块、向量索引、检索问答、引用反馈\nknowledge_space｜resource_category｜stored_object\nknowledge_document｜document_version｜knowledge_chunk｜document_job\ndocument_deletion_token｜qa_session｜qa_message｜qa_citation｜qa_feedback",
+      "group": "backend/learning_loop",
+      "width": 390,
+      "height": 220
+    },
+    {
+      "id": "evaluation",
+      "label": "评估、错题与掌握度\n诊断组卷、作答、客观评分、错题、申诉、证据聚合\nquestion｜question_version｜question_knowledge_point\nassessment｜assessment_question｜assessment_attempt｜attempt_answer\ngrading_record｜wrong_question｜assessment_appeal\nmastery_evidence｜knowledge_mastery｜mastery_snapshot",
+      "group": "backend/learning_loop",
+      "width": 390,
+      "height": 235
+    },
+    {
+      "id": "analytics",
+      "label": "学习分析与报告\n时长汇总、任务指标、掌握度趋势、AI文字总结\ndaily_study_stat｜study_report\n并读取 learning_task｜study_session｜assessment_attempt｜mastery_snapshot",
+      "group": "backend/learning_loop",
+      "width": 350,
+      "height": 155
+    },
+    {
+      "id": "notification",
+      "label": "通知与定时任务\n到期/逾期站内提醒、偏好、清理、统计锁\nnotification｜notification_preference｜scheduled_job_lock",
+      "group": "backend/support",
+      "width": 330,
+      "height": 130
+    },
+    {
+      "id": "governance",
+      "label": "后台治理与可观测记录\n目录/知识依赖/题库/模型/提示词/审计/运行指标\nlearning_direction｜knowledge_point｜knowledge_dependency\nmodel_provider_config｜model_config｜prompt_template\nmodel_run｜agent_tool_call｜audit_log",
+      "group": "backend/support",
+      "width": 360,
+      "height": 190
+    },
+    {
+      "id": "mysql",
+      "label": "MySQL 8\n84 张权威业务表\nFlyway V1～V11",
+      "group": "data",
+      "groupLabel": "数据与外部能力",
+      "style": "shape=cylinder3;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;",
+      "width": 180,
+      "height": 105
+    },
+    {
+      "id": "redis",
+      "label": "Redis\n验证码、限流与降级",
+      "group": "data",
+      "style": "shape=cylinder3;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;",
+      "width": 180,
+      "height": 90
+    },
+    {
+      "id": "python_ai",
+      "label": "FastAPI AI 服务\n画像/目标/计划/辅导/RAG\nLangChain + OpenAI兼容模型",
+      "group": "data",
+      "style": "rounded=1;whiteSpace=wrap;html=1;dashed=1;fillColor=#e1d5e7;strokeColor=#9673a6;",
+      "width": 240,
+      "height": 115
+    },
+    {
+      "id": "qdrant",
+      "label": "Qdrant\n派生向量索引\n可由 MySQL Chunk 重建",
+      "group": "data",
+      "style": "shape=cylinder3;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;",
+      "width": 190,
+      "height": 100
+    }
+  ],
+  "edges": [
+    {"source": "vue_learner", "target": "auth", "label": "JWT / REST"},
+    {"source": "vue_learner", "target": "profile"},
+    {"source": "vue_learner", "target": "goal"},
+    {"source": "vue_learner", "target": "planning"},
+    {"source": "vue_learner", "target": "execution"},
+    {"source": "vue_learner", "target": "knowledge"},
+    {"source": "vue_learner", "target": "evaluation"},
+    {"source": "vue_learner", "target": "analytics"},
+    {"source": "vue_admin", "target": "governance"},
+    {"source": "profile", "target": "goal", "label": "画像版本与容量"},
+    {"source": "goal", "target": "planning", "label": "活动目标"},
+    {"source": "planning", "target": "execution", "label": "确认发布正式任务"},
+    {"source": "knowledge", "target": "planning", "label": "知识证据"},
+    {"source": "knowledge", "target": "execution", "label": "任务资料与辅导引用"},
+    {"source": "execution", "target": "evaluation", "label": "学习证据"},
+    {"source": "evaluation", "target": "analytics", "label": "掌握度与成绩"},
+    {"source": "analytics", "target": "profile", "label": "缺口：尚未自动回写画像"},
+    {"source": "analytics", "target": "planning", "label": "缺口：尚未自动触发优化"},
+    {"source": "execution", "target": "notification", "label": "到期/逾期扫描"},
+    {"source": "auth", "target": "redis", "label": "验证码/限流"},
+    {"source": "profile", "target": "python_ai", "label": "结构化画像候选"},
+    {"source": "goal", "target": "python_ai", "label": "目标候选"},
+    {"source": "planning", "target": "python_ai", "label": "任务内容候选"},
+    {"source": "execution", "target": "python_ai", "label": "任务辅导"},
+    {"source": "knowledge", "target": "python_ai", "label": "索引/检索/问答"},
+    {"source": "python_ai", "target": "qdrant", "label": "向量读写"},
+    {"source": "governance", "target": "python_ai", "label": "运行模型热切换"},
+    {"source": "auth", "target": "mysql"},
+    {"source": "profile", "target": "mysql"},
+    {"source": "goal", "target": "mysql"},
+    {"source": "planning", "target": "mysql"},
+    {"source": "execution", "target": "mysql"},
+    {"source": "knowledge", "target": "mysql"},
+    {"source": "evaluation", "target": "mysql"},
+    {"source": "analytics", "target": "mysql"},
+    {"source": "notification", "target": "mysql"},
+    {"source": "governance", "target": "mysql"}
+  ]
+}

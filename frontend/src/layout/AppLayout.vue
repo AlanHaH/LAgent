@@ -1,9 +1,10 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { Bell, House, MoreFilled, Operation, Reading, Stopwatch, TrendCharts, User } from '@element-plus/icons-vue'
+import { Bell, Collection, House, Moon, MoreFilled, Operation, Reading, Stopwatch, Sunny, TrendCharts, User } from '@element-plus/icons-vue'
 import { useAuthStore } from '../stores/auth'
-import { api } from '../api/http'
+import { api, checkPythonAiHealth } from '../api/http'
+import { isDark, toggleTheme } from '../theme'
 
 const route = useRoute()
 const router = useRouter()
@@ -11,15 +12,28 @@ const auth = useAuthStore()
 const unread = ref(0)
 const profilePromptVisible = ref(false)
 const profilePromptChecking = ref(false)
+const pythonAiOnline = ref<boolean | null>(null)
+const pythonAiChecking = ref(false)
+let pythonAiHealthTimer: number | undefined
 
-const primaryMenu = [
+const learnerPrimaryMenu = [
   { path: '/dashboard', label: '总览', icon: House },
   { path: '/onboarding', label: '画像', icon: User },
   { path: '/goals', label: '目标', icon: TrendCharts },
-  { path: '/today', label: '今日任务', icon: Stopwatch },
-  { path: '/plans', label: 'AI 计划', icon: Operation },
+  { path: '/plans', label: '计划', icon: Operation },
+  { path: '/today', label: '任务', icon: Stopwatch },
+  { path: '/knowledge', label: '个人知识库', icon: Collection },
   { path: '/qa', label: '问答', icon: Reading },
 ]
+
+const primaryMenu = computed(() => auth.isAdmin
+  ? []
+  : learnerPrimaryMenu)
+
+const learnerMobilePaths = ['/dashboard', '/onboarding', '/goals', '/today', '/knowledge']
+const mobileMenu = computed(() => auth.isAdmin
+  ? [{ path: '/admin', label: '管理后台', icon: Operation }]
+  : learnerMobilePaths.map((path) => learnerPrimaryMenu.find((item) => item.path === path)!))
 
 const journeyGroups = computed(() => [
   {
@@ -50,13 +64,21 @@ const journeyGroups = computed(() => [
 
 const routeTitle = computed(() => String(route.meta.title || '学习空间'))
 const routeHint = computed(() => {
-  const found = primaryMenu.find((item) => route.path.startsWith(item.path))
+  if (auth.isAdmin) return '用户、内容、AI 与系统治理'
+  const found = primaryMenu.value.find((item) => navMatch(item.path))
   if (found) return found.path === '/today' ? '专注于此刻的一小步' : '你的自适应学习空间'
   return '探索、成长、沉淀'
 })
+const homePath = computed(() => auth.isAdmin ? '/admin' : '/dashboard')
+const homeLabel = computed(() => auth.isAdmin ? '返回管理后台' : '返回学习总览')
+
+// 精确或子路径匹配：/plans 下的 AI 提案、正式生效总览/详情子路由统一高亮「计划」
+function navMatch(path: string) {
+  return route.path === path || route.path.startsWith(path + '/')
+}
 
 function isActive(path: string) {
-  return route.path.startsWith(path)
+  return navMatch(path)
 }
 
 function profilePromptKey() {
@@ -68,7 +90,7 @@ function isOnProfilePage() {
 }
 
 async function checkProfilePrompt() {
-  if (!auth.authenticated || !auth.user || profilePromptChecking.value || isOnProfilePage()) return
+  if (!auth.authenticated || !auth.user || auth.isAdmin || profilePromptChecking.value || isOnProfilePage()) return
   if (sessionStorage.getItem(profilePromptKey()) === '1') return
   profilePromptChecking.value = true
   try {
@@ -79,6 +101,16 @@ async function checkProfilePrompt() {
     /* 画像提示不能影响正常进入系统 */
   } finally {
     profilePromptChecking.value = false
+  }
+}
+
+async function refreshApiStatus() {
+  if (pythonAiChecking.value) return
+  pythonAiChecking.value = true
+  try {
+    pythonAiOnline.value = await checkPythonAiHealth()
+  } finally {
+    pythonAiChecking.value = false
   }
 }
 
@@ -93,12 +125,22 @@ async function goProfile() {
 }
 
 onMounted(async () => {
+  await refreshApiStatus()
+  pythonAiHealthTimer = window.setInterval(refreshApiStatus, 30_000)
+  window.addEventListener('online', refreshApiStatus)
+  window.addEventListener('offline', refreshApiStatus)
   try {
     await auth.hydrate()
     await checkProfilePrompt()
     const page = await api<any>({ url: '/notifications', params: { unread: true, pageSize: 1 } })
     unread.value = page.total || 0
   } catch { /* interceptor handles */ }
+})
+
+onBeforeUnmount(() => {
+  if (pythonAiHealthTimer !== undefined) window.clearInterval(pythonAiHealthTimer)
+  window.removeEventListener('online', refreshApiStatus)
+  window.removeEventListener('offline', refreshApiStatus)
 })
 
 watch(() => route.path, () => {
@@ -117,12 +159,15 @@ async function logout() {
     <div class="ambient ambient-two" />
 
     <header class="experience-header">
-      <button class="wordmark" aria-label="返回学习总览" @click="router.push('/dashboard')">
-        <span class="wordmark-seal">序</span>
-        <span><b>知序</b><small>AI LEARNING STUDIO</small></span>
-      </button>
+      <div class="wordmark-group">
+        <button class="wordmark" :aria-label="homeLabel" @click="router.push(homePath)">
+          <span class="wordmark-seal">序</span>
+          <span><b>知序</b><small>{{ auth.isAdmin ? 'ADMIN CONTROL CENTER' : 'AI LEARNING STUDIO' }}</small></span>
+        </button>
+        <router-link v-if="auth.isAdmin" to="/admin" class="admin-text-link">后台管理</router-link>
+      </div>
 
-      <nav class="primary-nav" aria-label="主要导航">
+      <nav v-if="primaryMenu.length" class="primary-nav" aria-label="主要导航">
         <router-link
           v-for="item in primaryMenu"
           :key="item.path"
@@ -133,7 +178,7 @@ async function logout() {
           <span>{{ item.label }}</span>
         </router-link>
 
-        <el-popover placement="bottom" :width="620" trigger="click" popper-class="journey-popper">
+        <el-popover v-if="!auth.isAdmin" placement="bottom" :width="620" trigger="click" popper-class="journey-popper">
           <template #reference>
             <button class="explore-trigger" :class="{ active: !primaryMenu.some((item) => isActive(item.path)) }">
               <el-icon><MoreFilled /></el-icon><span>探索</span>
@@ -158,13 +203,30 @@ async function logout() {
       </nav>
 
       <div class="header-actions">
+        <button
+          class="api-health"
+          :class="{ online: pythonAiOnline === true, offline: pythonAiOnline === false, checking: pythonAiOnline === null }"
+          :title="pythonAiOnline === true ? 'Python AI 模型接口调用正常' : 'Python AI 模型接口调用失败，点击重试'"
+          @click="refreshApiStatus"
+        >
+          <span />
+          <small>{{ pythonAiOnline === null ? 'AI 检查中' : pythonAiOnline ? 'AI 接口正常' : 'AI 接口异常' }}</small>
+        </button>
+        <button
+          class="round-action"
+          :aria-label="isDark ? '切换为亮色模式' : '切换为黑夜模式'"
+          :title="isDark ? '切换为亮色模式' : '切换为黑夜模式'"
+          @click="toggleTheme"
+        >
+          <el-icon><component :is="isDark ? Sunny : Moon" /></el-icon>
+        </button>
         <el-badge :value="unread" :hidden="!unread">
           <button class="round-action" aria-label="通知"><el-icon><Bell /></el-icon></button>
         </el-badge>
         <el-dropdown @command="(command: string) => command === 'logout' ? logout() : router.push('/settings')">
           <button class="identity-chip">
             <span>{{ auth.user?.username?.slice(0, 1).toUpperCase() || 'U' }}</span>
-            <div><b>{{ auth.user?.username }}</b><small>{{ auth.isAdmin ? 'ADMIN / LEARNER' : 'LEARNER' }}</small></div>
+            <div><b>{{ auth.user?.username }}</b><small>{{ auth.isAdmin ? 'ADMINISTRATOR' : 'LEARNER' }}</small></div>
           </button>
           <template #dropdown>
             <el-dropdown-menu>
@@ -211,8 +273,8 @@ async function logout() {
       </template>
     </el-dialog>
 
-    <nav class="mobile-dock" aria-label="移动端主要导航">
-      <router-link v-for="item in primaryMenu.slice(0, 4)" :key="item.path" :to="item.path" :class="{ active: isActive(item.path) }">
+    <nav class="mobile-dock" aria-label="移动端主要导航" :class="{ 'admin-mobile-dock': auth.isAdmin }">
+      <router-link v-for="item in mobileMenu" :key="item.path" :to="item.path" :class="{ active: isActive(item.path) }">
         <el-icon><component :is="item.icon" /></el-icon><span>{{ item.label }}</span>
       </router-link>
       <router-link to="/settings" :class="{ active: isActive('/settings') }">
@@ -283,6 +345,10 @@ async function logout() {
   background: rgba(223, 238, 229, .68);
   font-size: 11px;
   font-weight: 700;
+}
+
+.admin-mobile-dock {
+  grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
 }
 
 @media (max-width: 520px) {

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator, model_validator
 
 
 class IndexChunk(BaseModel):
@@ -63,12 +63,23 @@ class SearchRequest(BaseModel):
 
     user_id: int = Field(alias="userId", gt=0)
     query: str = Field(min_length=1, max_length=2000)
-    allowed_space_ids: list[int] = Field(alias="allowedSpaceIds", min_length=1, max_length=100)
+    allowed_space_ids: list[int] = Field(
+        default_factory=list, alias="allowedSpaceIds", max_length=100
+    )
+    allowed_document_ids: list[int] = Field(
+        default_factory=list, alias="allowedDocumentIds", max_length=500
+    )
     allowed_document_version_ids: list[int] = Field(
         default_factory=list, alias="allowedDocumentVersionIds", max_length=500
     )
     top_k: int = Field(default=5, alias="topK", ge=1, le=20)
     candidate_k: int = Field(default=20, alias="candidateK", ge=1, le=100)
+
+    @model_validator(mode="after")
+    def require_scope(self) -> SearchRequest:
+        if not self.allowed_space_ids and not self.allowed_document_ids:
+            raise ValueError("allowedSpaceIds 与 allowedDocumentIds 至少提供一个")
+        return self
 
 
 class SearchHit(BaseModel):

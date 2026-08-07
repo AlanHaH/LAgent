@@ -35,8 +35,8 @@ public class StudySessionService {
     @Transactional
     public StudySessionEntity start(String taskPublicId) {
         LearningTaskEntity task = ownedTask(taskPublicId);
-        if (Set.of("CANCELED", "COMPLETED").contains(task.getLifecycleStatus()))
-            throw new BusinessException(ErrorCode.STATE_TRANSITION_INVALID, "当前任务不能开始计时");
+        if (!"IN_PROGRESS".equals(task.getLifecycleStatus()))
+            throw new BusinessException(ErrorCode.STATE_TRANSITION_INVALID, "任务必须先通过开始执行校验才能计时");
         StudySessionEntity running = sessionMapper.selectOne(new LambdaQueryWrapper<StudySessionEntity>().eq(StudySessionEntity::getUserId, task.getUserId()).eq(StudySessionEntity::getStatus, "RUNNING"));
         if (running != null) {
             if (running.getTaskId().equals(task.getId())) return running;
@@ -76,6 +76,9 @@ public class StudySessionService {
         StudySessionEntity s = owned(publicId);
         if ("RUNNING".equals(s.getStatus())) return s;
         if (!"PAUSED".equals(s.getStatus())) invalid();
+        LearningTaskEntity task = taskMapper.selectById(s.getTaskId());
+        if (task == null || !"IN_PROGRESS".equals(task.getLifecycleStatus()))
+            throw new BusinessException(ErrorCode.STATE_TRANSITION_INVALID, "任务不在执行中，不能恢复计时");
         StudySessionEntity another = sessionMapper.selectOne(new LambdaQueryWrapper<StudySessionEntity>().eq(StudySessionEntity::getUserId, s.getUserId()).eq(StudySessionEntity::getStatus, "RUNNING"));
         if (another != null) throw new BusinessException(ErrorCode.RESOURCE_VERSION_CONFLICT, "已有其他任务正在计时");
         StudySessionPauseEntity p = openPause(s.getId());
@@ -119,6 +122,10 @@ public class StudySessionService {
         LearningTaskEntity task = ownedTask(taskPublicId);
         if (reason == null || reason.isBlank() || startedAt == null || endedAt == null || !endedAt.isAfter(startedAt))
             throw new BusinessException(ErrorCode.COMMON_VALIDATION_ERROR, "手工补录必须提供合法时间和原因");
+        if (endedAt.isAfter(Instant.now()))
+            throw new BusinessException(ErrorCode.COMMON_VALIDATION_ERROR, "手工补录的结束时间不能晚于当前时间");
+        if ("CANCELED".equals(task.getLifecycleStatus()))
+            throw new BusinessException(ErrorCode.STATE_TRANSITION_INVALID, "已取消任务不能补录学习时间");
         long seconds = Duration.between(startedAt, endedAt).getSeconds();
         if (seconds < 60 || seconds > 24 * 3600)
             throw new BusinessException(ErrorCode.COMMON_VALIDATION_ERROR, "手工补录时长必须为 1 分钟～24 小时");
@@ -195,4 +202,3 @@ public class StudySessionService {
         throw new BusinessException(ErrorCode.RESOURCE_NOT_FOUND, "资源不存在");
     }
 }
-

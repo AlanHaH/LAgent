@@ -21,17 +21,21 @@ import java.util.List;
 @RequiredArgsConstructor
 public class PlanningController {
     private final PlanningService service;
-    public record JobRequest(String type,String projectId,@Size(max=2000) String userRequirement){}
+    public record JobRequest(String type,String projectId,@Size(max=2000) String userRequirement,
+                             @Size(max=20) List<@NotBlank String> knowledgeSpaceIds){}
     public record PublishRequest(@NotBlank String confirmationToken){}
     public record RejectRequest(@Size(max=1000) String reason){}
     public record PartialRequest(@NotEmpty List<String> selectedChangeIds){}
     public record RescheduleRequest(@NotNull ZonedDateTime scheduledStart,@NotNull ZonedDateTime dueAt,@NotBlank @Size(max=1000) String reason){}
 
     @PostMapping("/goals/{goalId}/planning-jobs") @ResponseStatus(HttpStatus.ACCEPTED)
-    public ApiResponse<PlanningService.JobView> job(@PathVariable String goalId,@Valid @RequestBody JobRequest r,@RequestHeader("Idempotency-Key") String key){return ApiResponse.ok(service.jobView(service.createJob(goalId,new PlanningService.JobRequest(r.type(),r.projectId(),r.userRequirement()),key)));}
+    public ApiResponse<PlanningService.JobView> job(@PathVariable String goalId,@Valid @RequestBody JobRequest r,@RequestHeader("Idempotency-Key") String key){return ApiResponse.ok(service.jobView(service.submitPlanningJob(goalId,new PlanningService.JobRequest(r.type(),r.projectId(),r.userRequirement(),r.knowledgeSpaceIds()),key)));}
     @PostMapping("/goals/{goalId}/optimization-requests") @ResponseStatus(HttpStatus.ACCEPTED)
-    public ApiResponse<PlanningService.JobView> optimize(@PathVariable String goalId,@Valid @RequestBody JobRequest r,@RequestHeader("Idempotency-Key") String key){return ApiResponse.ok(service.jobView(service.createJob(goalId,new PlanningService.JobRequest("OPTIMIZATION",r.projectId(),r.userRequirement()),key)));}
+    public ApiResponse<PlanningService.JobView> optimize(@PathVariable String goalId,@Valid @RequestBody JobRequest r,@RequestHeader("Idempotency-Key") String key){return ApiResponse.ok(service.jobView(service.submitOptimization(goalId,new PlanningService.JobRequest("OPTIMIZATION",r.projectId(),r.userRequirement(),r.knowledgeSpaceIds()),key)));}
     @GetMapping("/planning-jobs/{jobId}") public ApiResponse<PlanningService.JobView> job(@PathVariable String jobId){return ApiResponse.ok(service.jobView(service.getJob(jobId)));}
+    @GetMapping("/goals/{goalId}/planning-jobs") public ApiResponse<PlanningService.JobView> latestJob(@PathVariable String goalId){return ApiResponse.ok(service.latestJobForGoal(goalId));}
+    @GetMapping("/goals/{goalId}/plan") public ApiResponse<PlanningService.VersionDetail> currentPlan(@PathVariable String goalId,@RequestParam(required=false) String projectId){return ApiResponse.ok(service.currentPlanForGoal(goalId,projectId));}
+    @GetMapping("/goals/{goalId}/effective-plan") public ApiResponse<PlanningService.EffectivePlanView> effectivePlan(@PathVariable String goalId,@RequestParam(required=false) String projectId){return ApiResponse.ok(service.effectivePlan(goalId,projectId));}
     @GetMapping("/plans/{planId}") public ApiResponse<PlanningService.PlanDetail> plan(@PathVariable String planId){return ApiResponse.ok(service.getPlan(planId));}
     @GetMapping("/plans/{planId}/versions") public ApiResponse<List<PlanVersionEntity>> versions(@PathVariable String planId){return ApiResponse.ok(service.versions(planId));}
     @GetMapping("/plan-versions/{versionId}") public ApiResponse<PlanningService.VersionDetail> version(@PathVariable String versionId){return ApiResponse.ok(service.version(versionId));}

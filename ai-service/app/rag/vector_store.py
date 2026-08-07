@@ -144,13 +144,26 @@ class QdrantVectorStore:
         *,
         user_id: int,
         allowed_space_ids: list[int],
+        allowed_document_ids: list[int],
         allowed_document_version_ids: list[int],
         limit: int,
     ) -> list[VectorHit]:
         conditions: list[models.Condition] = [
             models.FieldCondition(key="indexStatus", match=models.MatchValue(value="ACTIVE")),
-            models.FieldCondition(key="spaceId", match=models.MatchAny(any=allowed_space_ids)),
         ]
+        if allowed_document_ids:
+            # 问答可精确到文件：按 documentId 过滤；否则按空间过滤
+            conditions.append(
+                models.FieldCondition(
+                    key="documentId", match=models.MatchAny(any=allowed_document_ids)
+                )
+            )
+        else:
+            conditions.append(
+                models.FieldCondition(
+                    key="spaceId", match=models.MatchAny(any=allowed_space_ids)
+                )
+            )
         if allowed_document_version_ids:
             conditions.append(
                 models.FieldCondition(
@@ -223,6 +236,7 @@ class QdrantVectorStore:
         fields = {
             "ownerUserId": models.PayloadSchemaType.INTEGER,
             "spaceId": models.PayloadSchemaType.INTEGER,
+            "documentId": models.PayloadSchemaType.INTEGER,
             "documentVersionId": models.PayloadSchemaType.INTEGER,
             "visibility": models.PayloadSchemaType.KEYWORD,
             "indexStatus": models.PayloadSchemaType.KEYWORD,

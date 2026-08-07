@@ -10,6 +10,7 @@ import org.springframework.web.bind.annotation.*;
 
 import java.time.*;
 import java.util.List;
+import java.util.Map;
 
 @RestController
 @RequestMapping("/api/v1")
@@ -17,6 +18,7 @@ import java.util.List;
 public class ExecutionController {
     private final TaskService tasks;
     private final StudySessionService sessions;
+    private final LearningBlockService learningBlocks;
 
     public record UpdateTaskRequest(@Size(min = 2, max = 200) String title, @Size(max = 2000) String description,
                                     String priority, @Min(10) @Max(120) Integer estimatedMinutes,
@@ -38,14 +40,48 @@ public class ExecutionController {
                               Integer version) {
     }
 
+    public record BlockTestRequest(@NotNull Map<String, String> answers) {
+    }
+
+    public record BlockSourcesRequest(@NotEmpty @Size(max = 20) List<@NotBlank String> knowledgeSpaceIds) {
+    }
+
     @GetMapping("/tasks")
     public ApiResponse<List<TaskService.TaskView>> list(@RequestParam(required = false) LocalDate date, @RequestParam(required = false) String status) {
         return ApiResponse.ok(tasks.list(date, status));
     }
 
+    @GetMapping("/tasks/graph")
+    public ApiResponse<TaskService.TaskGraphView> graph() {
+        return ApiResponse.ok(tasks.graph());
+    }
+
     @GetMapping("/tasks/{id}")
     public ApiResponse<TaskService.TaskView> get(@PathVariable String id) {
         return ApiResponse.ok(tasks.get(id));
+    }
+
+    @GetMapping("/tasks/{id}/learning-block")
+    public ApiResponse<Map<String, Object>> learningBlock(@PathVariable String id) {
+        return ApiResponse.ok(learningBlocks.byTask(id));
+    }
+
+    @PostMapping("/tasks/{id}/learning-block/generation")
+    @ResponseStatus(org.springframework.http.HttpStatus.ACCEPTED)
+    public ApiResponse<Map<String, Object>> generateLearningBlock(@PathVariable String id) {
+        return ApiResponse.ok(learningBlocks.generate(id));
+    }
+
+    @PostMapping("/tasks/{id}/learning-block/sources")
+    public ApiResponse<Map<String, Object>> attachLearningBlockSources(
+            @PathVariable String id, @Valid @RequestBody BlockSourcesRequest request) {
+        return ApiResponse.ok(learningBlocks.attachSources(id, request.knowledgeSpaceIds()));
+    }
+
+    @PostMapping("/learning-blocks/{id}/test-attempts")
+    public ApiResponse<Map<String, Object>> submitBlockTest(@PathVariable String id,
+                                                            @Valid @RequestBody BlockTestRequest request) {
+        return ApiResponse.ok(learningBlocks.submit(id, request.answers()));
     }
 
     @PatchMapping("/tasks/{id}")
@@ -111,11 +147,22 @@ public class ExecutionController {
     }
 
     public record ChatRequest(@NotBlank @Size(max = 2000) String message,
-                              @Size(max = 10) List<com.adaptivelearning.shared.ai.PythonAiServiceClient.TaskChatTurn> history) {
+                              @Size(max = 400) List<com.adaptivelearning.shared.ai.PythonAiServiceClient.TaskChatTurn> history) {
     }
 
     @PostMapping("/tasks/{id}/chats")
-    public ApiResponse<com.adaptivelearning.shared.ai.PythonAiServiceClient.TaskChatResult> chat(@PathVariable String id, @Valid @RequestBody ChatRequest r) {
+    public ApiResponse<TaskService.TaskChatResponse> chat(@PathVariable String id, @Valid @RequestBody ChatRequest r) {
         return ApiResponse.ok(tasks.chat(id, r.message(), r.history()));
+    }
+
+    @GetMapping("/tasks/{id}/chats")
+    public ApiResponse<TaskService.TaskChatHistory> chats(@PathVariable String id) {
+        return ApiResponse.ok(tasks.chatHistory(id));
+    }
+
+    @DeleteMapping("/tasks/{id}/chats")
+    public ApiResponse<Void> clearChats(@PathVariable String id) {
+        tasks.clearChat(id);
+        return ApiResponse.ok(null);
     }
 }

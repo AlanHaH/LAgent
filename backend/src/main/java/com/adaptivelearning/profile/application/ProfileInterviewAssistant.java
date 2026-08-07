@@ -37,6 +37,8 @@ public class ProfileInterviewAssistant {
     private static final Pattern PERIOD = Pattern.compile("(?:(\\d{1,3})|([一二两三四五六七八九十]{1,3}))\\s*(天|周|个月|月)");
     private static final Pattern TIME_RANGE = Pattern.compile("([01]?\\d|2[0-3]):([0-5]\\d)\\s*[-~～—到至]\\s*([01]?\\d|2[0-3]):([0-5]\\d)");
     private static final Pattern WEEKDAY = Pattern.compile("(?:周|星期)([一二三四五六日天1-7])");
+    private static final Pattern WEEKLY_DAY_COUNT = Pattern.compile(
+            "(?:每周|一周).{0,12}?(?:\\d+|[一二两三四五六七八九十]+)\\s*天");
     private static final Pattern CUSTOM_DIRECTION = Pattern.compile(
             "(?:想学(?:习)?|学习方向(?:是|为)?|准备学|计划学)\\s*([\\p{IsHan}A-Za-z0-9+#. ]{1,40}?)(?=，|,|。|；|;|目前|现在|基础|计划|从|每周|$)");
     private static final Pattern STATED_DURATION = Pattern.compile("(?:共|时间段是|周期(?:为|是)?)\\s*(\\d{1,3})\\s*天");
@@ -60,7 +62,9 @@ public class ProfileInterviewAssistant {
               "availability":[{"weekday":1到7,"start":"HH:mm","end":"HH:mm","energyLevel":"LOW|MEDIUM|HIGH"}]或null
             }}
             若用户明确给出开始和结束日期，planPeriodDays 必须为 null，且 assistantMessage 不要自行计算天数；只有相对周期才给 planPeriodDays。
-            若只给截止日期，开始日期留空。availability 出现时输出完整周模板。
+            若只给截止日期，开始日期留空。availability 只能包含用户本轮明确说出的星期和时间。
+            “每周学习三天”只表示频次，不能补成周一到周日都有空；若没有具体星期或时间，
+            availability 输出 null，并追问具体星期几和时间段。“每天”才表示一周七天。
             """;
 
     private final AiModelClient modelClient;
@@ -92,7 +96,7 @@ public class ProfileInterviewAssistant {
                 return turn;
             } catch (IllegalArgumentException e) {
                 safeRecordFailure(userId, userMessage, 0, "MODEL_OUTPUT_INVALID");
-                throw new AiModelException(ErrorCode.MODEL_PROVIDER_ERROR, e);
+                return guidedFallback(current, userMessage, directions);
             }
         }
         if (modelClient.isConfigured()) {
@@ -105,10 +109,10 @@ public class ProfileInterviewAssistant {
                 return turn;
             } catch (IllegalArgumentException e) {
                 safeRecordFailure(userId, userMessage, 0, "MODEL_OUTPUT_INVALID");
-                throw new AiModelException(ErrorCode.MODEL_PROVIDER_ERROR, e);
+                return guidedFallback(current, userMessage, directions);
             }
         }
-        throw new AiModelException(ErrorCode.SERVICE_TEMPORARILY_UNAVAILABLE);
+        return guidedFallback(current, userMessage, directions);
     }
 
     public AssistantTurn respondStreaming(long userId, Draft current, List<Transcript> transcript,
@@ -140,7 +144,9 @@ public class ProfileInterviewAssistant {
                 throw e;
             } catch (IllegalArgumentException e) {
                 safeRecordFailure(userId, userMessage, 0, "MODEL_OUTPUT_INVALID");
-                throw new AiModelException(ErrorCode.MODEL_PROVIDER_ERROR, e);
+                Draft fallback = deterministicExtract(current, userMessage, directions);
+                String message = visible.toString().isBlank() ? fallbackQuestion(fallback) : visible.toString();
+                return new AssistantTurn(message, fallback, visible.toString().isBlank() ? "GUIDED" : "AI");
             }
         }
         if (modelClient.isConfigured()) {
@@ -159,10 +165,15 @@ public class ProfileInterviewAssistant {
                 throw e;
             } catch (IllegalArgumentException e) {
                 safeRecordFailure(userId, userMessage, 0, "MODEL_OUTPUT_INVALID");
-                throw new AiModelException(ErrorCode.MODEL_PROVIDER_ERROR, e);
+                Draft fallback = deterministicExtract(current, userMessage, directions);
+                String visible = projector.emittedText();
+                return new AssistantTurn(visible.isBlank() ? fallbackQuestion(fallback) : visible,
+                        fallback, visible.isBlank() ? "GUIDED" : "AI");
             }
         }
-        throw new AiModelException(ErrorCode.SERVICE_TEMPORARILY_UNAVAILABLE);
+        AssistantTurn fallback = guidedFallback(current, userMessage, directions);
+        assistantOutput.delta(fallback.assistantMessage());
+        return fallback;
     }
 
     public interface StreamOutput {
@@ -276,7 +287,13 @@ public class ProfileInterviewAssistant {
     }
 
     private AssistantTurn withReadyPrompt(AssistantTurn turn) {
-        if (!ready(turn.draft()) || mentionsReadyConfirmation(turn.assistantMessage())) return turn;
+        if (!ready(turn.draft())) {
+            if (claimsCompleteDraft(turn.assistantMessage())) {
+                return new AssistantTurn(fallbackQuestion(turn.draft()), turn.draft(), turn.mode());
+            }
+            return turn;
+        }
+        if (mentionsReadyConfirmation(turn.assistantMessage())) return turn;
         String message = turn.assistantMessage().trim();
         String joined = message.isBlank() ? READY_PROMPT : message + "\n\n" + READY_PROMPT;
         if (joined.length() > 1000) joined = READY_PROMPT;
@@ -285,12 +302,14 @@ public class ProfileInterviewAssistant {
 
     private AssistantTurn withReadyPrompt(AssistantTurn turn, StreamOutput output, String alreadyVisible) {
         AssistantTurn normalized = withReadyPrompt(turn);
-        if (!Objects.equals(normalized.assistantMessage(), turn.assistantMessage())) {
-            String visible = alreadyVisible == null ? "" : alreadyVisible;
-            if (normalized.assistantMessage().startsWith(visible)) {
-                String suffix = normalized.assistantMessage().substring(visible.length());
-                if (!suffix.isBlank()) output.delta(suffix);
-            }
+        String finalMessage = normalized.assistantMessage();
+        String visible = alreadyVisible == null ? "" : alreadyVisible;
+        if (Objects.equals(finalMessage, visible)) return normalized;
+        if (finalMessage.startsWith(visible)) {
+            String suffix = finalMessage.substring(visible.length());
+            if (!suffix.isBlank()) output.delta(suffix);
+        } else {
+            output.replace(finalMessage);
         }
         return normalized;
     }
@@ -307,7 +326,11 @@ public class ProfileInterviewAssistant {
     }
 
     private boolean mentionsReadyConfirmation(String message) {
-        return message != null && message.contains("确认") && (message.contains("画像") || message.contains("草稿"));
+        return message != null && message.contains("点击") && message.contains("确认并保存画像");
+    }
+
+    private boolean claimsCompleteDraft(String message) {
+        return message != null && message.contains("草稿") && message.contains("完整");
     }
 
     private String prompt(Draft current, List<Transcript> transcript, String userMessage,
@@ -341,6 +364,9 @@ public class ProfileInterviewAssistant {
             String message = root.path("assistantMessage").asText().trim();
             if (message.isBlank() || message.length() > 1000) throw new IllegalArgumentException("assistantMessage invalid");
             Draft merged = merge(current, root.path("updates"), directions, evidenceMessage);
+            if (weeklyFrequencyWithoutSpecificDays(evidenceMessage)) {
+                message = weeklyScheduleQuestion();
+            }
             return new AssistantTurn(message, merged, "AI");
         } catch (DateTimeException | ArithmeticException e) {
             throw new IllegalArgumentException("AI response value invalid", e);
@@ -385,8 +411,11 @@ public class ProfileInterviewAssistant {
         String background = text(u, "backgroundText", d.backgroundText());
         if (background != null && background.length() > 2000) background = background.substring(0, 2000);
         PreferenceDraft preference = mergePreference(d.preference(), u.path("preference"));
-        List<SlotDraft> availability = u.hasNonNull("availability")
-                ? parseAvailability(u.path("availability")) : d.availability();
+        List<SlotDraft> availability = weeklyFrequencyWithoutSpecificDays(evidenceMessage)
+                ? List.of()
+                : u.hasNonNull("availability")
+                    ? parseAvailability(u.path("availability"))
+                    : d.availability();
         Map<String, String> evidence = new LinkedHashMap<>(d.evidence() == null ? Map.of() : d.evidence());
         String marker = evidenceMarker(evidenceMessage);
         markChanged(evidence, marker, "学习方向", d.directionName(), directionName);
@@ -485,6 +514,35 @@ public class ProfileInterviewAssistant {
         }
         try { return merge(d, json.valueToTree(updates), directions, message); }
         catch (RuntimeException e) { return d; }
+    }
+
+    private AssistantTurn guidedFallback(Draft current, String userMessage, List<DirectionOption> directions) {
+        Draft draft = deterministicExtract(current, userMessage, directions);
+        if (weeklyFrequencyWithoutSpecificDays(userMessage)) {
+            return new AssistantTurn(weeklyScheduleQuestion(), draft, "GUIDED");
+        }
+        return withReadyPrompt(new AssistantTurn(fallbackQuestion(draft), draft, "GUIDED"));
+    }
+
+    private boolean weeklyFrequencyWithoutSpecificDays(String message) {
+        if (message == null || !WEEKLY_DAY_COUNT.matcher(message).find()) return false;
+        if (containsAny(message, "每天", "工作日", "周末")) return false;
+        Matcher matcher = WEEKDAY.matcher(message);
+        while (matcher.find()) {
+            boolean countExpression = matcher.end() < message.length()
+                    && message.charAt(matcher.end()) == '天'
+                    && matcher.start() > 0
+                    && (message.charAt(matcher.start() - 1) == '每'
+                        || message.charAt(matcher.start() - 1) == '一');
+            if (!countExpression) return false;
+        }
+        return true;
+    }
+
+    private String weeklyScheduleQuestion() {
+        return "我记下了你计划每周学习几天，但还不能替你决定具体日期。"
+                + "请选择具体星期几，并告诉我每次可学习的时间段，"
+                + "例如“周一、周三、周五 19:00-21:00”。";
     }
 
     private String fallbackQuestion(Draft d) {

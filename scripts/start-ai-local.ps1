@@ -29,17 +29,27 @@ Get-Content -LiteralPath $envFile | ForEach-Object {
 
 $mapping = @{
     AI_INTERNAL_TOKEN = 'AI_INTERNAL_TOKEN'
+    AI_PROMPT_SYNC_URL = 'AI_PROMPT_SYNC_URL'
+    AI_PROMPT_SYNC_TTL_SECONDS = 'AI_PROMPT_SYNC_TTL_SECONDS'
     AI_MODEL_BASE_URL = 'MODEL_BASE_URL'
     AI_MODEL_API_KEY = 'MODEL_API_KEY'
     AI_MODEL_NAME = 'MODEL_NAME'
     AI_MODEL_MAX_OUTPUT_TOKENS = 'MODEL_MAX_OUTPUT_TOKENS'
     AI_MODEL_THINKING = 'MODEL_THINKING'
+    AI_MODEL_TIMEOUT_SECONDS = 'MODEL_TIMEOUT_SECONDS'
     AI_EMBEDDING_PROVIDER = 'AI_EMBEDDING_PROVIDER'
     AI_EMBEDDING_MODEL = 'AI_EMBEDDING_MODEL'
     AI_EMBEDDING_DEVICE = 'AI_EMBEDDING_DEVICE'
     AI_ALLOW_HASH_FALLBACK = 'AI_ALLOW_HASH_FALLBACK'
     AI_QDRANT_MODE = 'AI_QDRANT_MODE'
     AI_QDRANT_URL = 'AI_QDRANT_URL'
+    AI_QDRANT_API_KEY = 'QDRANT_API_KEY'
+    AI_OCR_ENABLED = 'AI_OCR_ENABLED'
+    AI_OCR_MAX_FILE_MB = 'AI_OCR_MAX_FILE_MB'
+    AI_OCR_MAX_PAGES = 'AI_OCR_MAX_PAGES'
+    AI_OCR_DPI = 'AI_OCR_DPI'
+    AI_WEREAD_MCP_URL = 'AI_WEREAD_MCP_URL'
+    AI_WEREAD_MCP_FAKE = 'AI_WEREAD_MCP_FAKE'
 }
 foreach ($target in $mapping.Keys) {
     $source = $mapping[$target]
@@ -65,6 +75,15 @@ if ($Port -lt 1 -or $Port -gt 65535) {
     throw 'Port must be between 1 and 65535.'
 }
 $env:AI_SERVICE_PORT = $Port.ToString()
+
+# Qdrant and the Java backend are local dependencies. Some Windows proxy tools
+# inject HTTP(S)_PROXY into new processes and otherwise route localhost through
+# the proxy, which makes Qdrant requests fail with a misleading 502 response.
+$localNoProxy = @('127.0.0.1', 'localhost')
+$existingNoProxy = @([string]$env:NO_PROXY -split ',') |
+    ForEach-Object { $_.Trim() } |
+    Where-Object { $_ }
+$env:NO_PROXY = (($existingNoProxy + $localNoProxy) | Select-Object -Unique) -join ','
 
 $missing = @('AI_INTERNAL_TOKEN', 'MODEL_BASE_URL', 'MODEL_API_KEY', 'MODEL_NAME') |
     Where-Object { -not $config.ContainsKey($_) -or -not $config[$_] }

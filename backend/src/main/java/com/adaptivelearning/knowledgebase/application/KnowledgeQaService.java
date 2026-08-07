@@ -19,12 +19,14 @@ import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.annotation.JsonIgnore;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 
 import java.math.BigDecimal;
 import java.math.RoundingMode;
@@ -35,6 +37,7 @@ import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.HashMap;
 import java.util.UUID;
 import java.util.function.Consumer;
 
@@ -62,12 +65,17 @@ public class KnowledgeQaService {
                             String quotePreview, double score) {}
 
     public record SearchResult(boolean evidenceSufficient, List<SearchHit> hits, long latencyMs) {}
-    public record MessageView(QaMessageEntity message, List<QaCitationEntity> citations) {}
+    public record MessageView(QaMessageEntity message, List<CitationView> citations) {}
+
+    /** 引用视图：附带来源文档名与页码，供前端引用卡片展示出处。 */
+    public record CitationView(String citationCode, Long chunkId, Long documentVersionId, String quotePreview,
+                               Integer rankNo, BigDecimal scoreSnapshot, String accessStatus,
+                               String fileName, Integer pageFrom, Integer pageTo) {}
     public record AnswerResult(MessageView userMessage, MessageView assistantMessage, boolean evidenceSufficient) {}
 
     private record Candidate(long chunkId, long versionId, long documentDbId, String documentId,
                              String fileName, String text,
-                             String vectorJson, Integer pageFrom, Integer pageTo) {}
+                             String vectorJson, Integer pageFrom, Integer pageTo, String titlePathJson) {}
 
     public SearchResult search(String query, List<String> spaceIds, Integer topK) {
         long begin = System.nanoTime();
@@ -77,32 +85,57 @@ public class KnowledgeQaService {
         if (spaceIds == null || spaceIds.isEmpty()) {
             throw new BusinessException(ErrorCode.COMMON_VALIDATION_ERROR, "至少选择一个知识空间");
         }
-
         List<Long> ids = spaceIds.stream().map(documents::accessibleSpace).map(KnowledgeSpaceEntity::getId).toList();
+        return searchScoped(query, List.of(), ids, topK, begin);
+    }
+
+    /** 按具体文件检索：SQL 对本人/公开资料二次鉴权后，才把文档 ID 交给 Python 预过滤。 */
+    public SearchResult searchDocuments(String query, List<String> documentIds, Integer topK) {
+        long begin = System.nanoTime();
+        if (query == null || query.isBlank()) {
+            throw new BusinessException(ErrorCode.COMMON_VALIDATION_ERROR, "检索问题不能为空");
+        }
+        if (documentIds == null || documentIds.isEmpty()) {
+            throw new BusinessException(ErrorCode.COMMON_VALIDATION_ERROR, "至少选择一个文件");
+        }
+        return searchScoped(query, documentIds, List.of(), topK, begin);
+    }
+
+    private SearchResult searchScoped(String query, List<String> documentPublicIds,
+                                      List<Long> spaceDbIds, Integer topK, long begin) {
         int limit = Math.min(Math.max(1, topK == null ? defaultTopK : topK), 20);
         if (!pythonAi.isConfigured()) {
             throw new AiModelException(ErrorCode.SERVICE_TEMPORARILY_UNAVAILABLE);
         }
-        return pythonSearch(query, ids, limit, begin);
+        List<Candidate> authorized = documentPublicIds.isEmpty()
+                ? authorizedCandidates(spaceDbIds)
+                : authorizedDocumentCandidates(documentPublicIds);
+        if (authorized.isEmpty()) {
+            return new SearchResult(false, List.of(), elapsedMs(begin));
+        }
+        List<Long> documentDbIds = authorized.stream().map(Candidate::documentDbId).distinct().toList();
+        return pythonSearch(query, spaceDbIds, documentDbIds, authorized, limit, begin);
     }
 
-    private SearchResult pythonSearch(String query, List<Long> allowedSpaceIds, int limit, long begin) {
+    private SearchResult pythonSearch(String query, List<Long> allowedSpaceIds,
+                                      List<Long> allowedDocumentIds, List<Candidate> authorized,
+                                      int limit, long begin) {
         PythonAiServiceClient.SearchResult result = pythonAi.search(
-                SecurityUtils.currentUserId(), query, allowedSpaceIds, List.of(), limit,
-                Math.max(20, limit));
-        Map<Long, Candidate> authorized = authorizedCandidates(allowedSpaceIds).stream()
+                SecurityUtils.currentUserId(), query, allowedSpaceIds, allowedDocumentIds, List.of(),
+                limit, Math.max(20, limit));
+        Map<Long, Candidate> byChunk = authorized.stream()
                 .collect(java.util.stream.Collectors.toMap(Candidate::chunkId, item -> item));
         List<SearchHit> hits = new ArrayList<>();
         for (PythonAiServiceClient.SearchHit item : result.hits()) {
-            Candidate candidate = authorized.get(item.chunkId());
+            Candidate candidate = byChunk.get(item.chunkId());
             if (candidate == null || candidate.versionId() != item.documentVersionId()
                     || candidate.documentDbId() != item.documentId()) {
                 continue;
             }
             hits.add(new SearchHit("S" + (hits.size() + 1), candidate.documentId(),
                     String.valueOf(candidate.versionId()), candidate.chunkId(), candidate.documentDbId(),
-                    candidate.fileName(),
-                    List.of(), candidate.pageFrom(), candidate.pageTo(), preview(candidate.text()), item.score()));
+                    candidate.fileName(), parseTitlePath(candidate.titlePathJson()),
+                    candidate.pageFrom(), candidate.pageTo(), preview(candidate.text()), item.score()));
             if (hits.size() == limit) break;
         }
         return new SearchResult(result.evidenceSufficient() && !hits.isEmpty(), List.copyOf(hits), elapsedMs(begin));
@@ -128,7 +161,8 @@ public class KnowledgeQaService {
             Scored item = scored.get(i);
             Candidate candidate = item.candidate();
             hits.add(new SearchHit("S" + (i + 1), candidate.documentId(), String.valueOf(candidate.versionId()),
-                    candidate.chunkId(), candidate.documentDbId(), candidate.fileName(), List.of(),
+                    candidate.chunkId(), candidate.documentDbId(), candidate.fileName(),
+                    parseTitlePath(candidate.titlePathJson()),
                     candidate.pageFrom(), candidate.pageTo(),
                     preview(candidate.text()), item.score()));
         }
@@ -136,34 +170,42 @@ public class KnowledgeQaService {
     }
 
     private List<Candidate> authorizedCandidates(List<Long> ids) {
-        String marks = String.join(",", Collections.nCopies(ids.size(), "?"));
-        List<Object> args = new ArrayList<>(ids);
+        return authorizedBy("d.space_id", ids);
+    }
+
+    private List<Candidate> authorizedDocumentCandidates(List<String> publicIds) {
+        return authorizedBy("d.public_id", publicIds);
+    }
+
+    private List<Candidate> authorizedBy(String column, List<?> values) {
+        String marks = String.join(",", Collections.nCopies(values.size(), "?"));
+        List<Object> args = new ArrayList<>(values);
         args.add(SecurityUtils.currentUserId());
         return jdbc.query("""
                         SELECT c.id,c.document_version_id,d.id,d.public_id,d.display_name,c.text,c.vector_json,
-                               c.page_from,c.page_to
+                               c.page_from,c.page_to,c.title_path_json
                         FROM knowledge_chunk c
                         JOIN document_version v ON v.id=c.document_version_id
                         JOIN knowledge_document d ON d.id=v.document_id
                         JOIN knowledge_space s ON s.id=d.space_id
-                        WHERE d.space_id IN (""" + marks + ") AND d.status='INDEXED'"
+                        """ + "WHERE " + column + " IN (" + marks + ") AND d.status='INDEXED'"
                         + " AND v.version_no=d.active_version_no AND (s.visibility='PUBLIC' OR s.user_id=?)",
                 (rs, row) -> new Candidate(rs.getLong(1), rs.getLong(2), rs.getLong(3), rs.getString(4),
                         rs.getString(5), rs.getString(6), rs.getString(7),
-                        (Integer) rs.getObject(8), (Integer) rs.getObject(9)),
+                        (Integer) rs.getObject(8), (Integer) rs.getObject(9), rs.getString(10)),
                 args.toArray());
     }
 
-    public QaSessionEntity createSession(String title, List<String> spaceIds) {
-        if (spaceIds == null || spaceIds.isEmpty()) {
-            throw new BusinessException(ErrorCode.COMMON_VALIDATION_ERROR, "至少选择一个知识空间");
+    public QaSessionEntity createSession(String title, List<String> documentIds) {
+        if (documentIds == null || documentIds.isEmpty()) {
+            throw new BusinessException(ErrorCode.COMMON_VALIDATION_ERROR, "至少选择一个文件");
         }
-        spaceIds.forEach(documents::accessibleSpace);
+        documentIds.forEach(documents::detail);
         QaSessionEntity session = new QaSessionEntity();
         session.setPublicId(UUID.randomUUID().toString());
         session.setUserId(SecurityUtils.currentUserId());
         session.setTitle(title == null || title.isBlank() ? "新对话" : title);
-        session.setSelectedSpaceJson(toJson(spaceIds));
+        session.setSelectedSpaceJson(toJson(Map.of("scope", "DOCUMENT", "ids", documentIds)));
         session.setStatus("ACTIVE");
         sessionMapper.insert(session);
         return session;
@@ -173,6 +215,33 @@ public class KnowledgeQaService {
         return sessionMapper.selectList(new LambdaQueryWrapper<QaSessionEntity>()
                 .eq(QaSessionEntity::getUserId, SecurityUtils.currentUserId())
                 .orderByDesc(QaSessionEntity::getUpdatedAt));
+    }
+
+    public QaSessionEntity renameSession(String sessionId, String title) {
+        if (title == null || title.isBlank() || title.length() > 200) {
+            throw new BusinessException(ErrorCode.COMMON_VALIDATION_ERROR, "对话标题不能为空且不能超过 200 字");
+        }
+        QaSessionEntity session = ownedSession(sessionId);
+        session.setTitle(title.trim());
+        sessionMapper.updateById(session);
+        return session;
+    }
+
+    @Transactional
+    public void deleteSession(String sessionId) {
+        QaSessionEntity session = ownedSession(sessionId);
+        List<QaMessageEntity> msgs = messageMapper.selectList(new LambdaQueryWrapper<QaMessageEntity>()
+                .eq(QaMessageEntity::getSessionId, session.getId()));
+        if (!msgs.isEmpty()) {
+            List<Long> messageIds = msgs.stream().map(QaMessageEntity::getId).toList();
+            citationMapper.delete(new LambdaQueryWrapper<QaCitationEntity>()
+                    .in(QaCitationEntity::getMessageId, messageIds));
+            feedbackMapper.delete(new LambdaQueryWrapper<QaFeedbackEntity>()
+                    .in(QaFeedbackEntity::getMessageId, messageIds));
+            messageMapper.delete(new LambdaQueryWrapper<QaMessageEntity>()
+                    .in(QaMessageEntity::getId, messageIds));
+        }
+        sessionMapper.deleteById(session.getId());
     }
 
     public AnswerResult ask(String sessionId, String question) {
@@ -185,8 +254,10 @@ public class KnowledgeQaService {
         long userId = SecurityUtils.currentUserId();
         QaSessionEntity session = ownedSession(sessionId);
         QaMessageEntity user = message(session, "USER", question, null, null, null, 0);
-        List<String> spaces = read(session.getSelectedSpaceJson(), new TypeReference<>() {});
-        SearchResult result = search(question, spaces, defaultTopK);
+        SearchScope scope = scopeOf(session.getSelectedSpaceJson());
+        SearchResult result = "DOCUMENT".equals(scope.type())
+                ? searchDocuments(question, scope.ids(), defaultTopK)
+                : search(question, scope.ids(), defaultTopK);
 
         String content;
         String answerMode;
@@ -296,9 +367,53 @@ public class KnowledgeQaService {
     }
 
     private MessageView view(QaMessageEntity message) {
-        return new MessageView(message, citationMapper.selectList(new LambdaQueryWrapper<QaCitationEntity>()
+        List<QaCitationEntity> citations = citationMapper.selectList(new LambdaQueryWrapper<QaCitationEntity>()
                 .eq(QaCitationEntity::getMessageId, message.getId())
-                .orderByAsc(QaCitationEntity::getRankNo)));
+                .orderByAsc(QaCitationEntity::getRankNo));
+        return new MessageView(message, citations.stream().map(this::citationView).toList());
+    }
+
+    private CitationView citationView(QaCitationEntity citation) {
+        Map<String, Object> meta = jdbc.query("""
+                SELECT d.display_name AS fileName, ch.page_from AS pageFrom, ch.page_to AS pageTo
+                FROM knowledge_chunk ch
+                JOIN document_version v ON v.id=ch.document_version_id
+                JOIN knowledge_document d ON d.id=v.document_id
+                WHERE ch.id=?
+                """, rs -> {
+            Map<String, Object> result = new HashMap<>();
+            if (rs.next()) {
+                result.put("fileName", rs.getString(1));
+                result.put("pageFrom", rs.getObject(2));
+                result.put("pageTo", rs.getObject(3));
+            }
+            return result;
+        }, citation.getChunkId());
+        return new CitationView(citation.getCitationCode(), citation.getChunkId(),
+                citation.getDocumentVersionId(), citation.getQuotePreview(), citation.getRankNo(),
+                citation.getScoreSnapshot(), citation.getAccessStatus(),
+                (String) meta.get("fileName"), (Integer) meta.get("pageFrom"), (Integer) meta.get("pageTo"));
+    }
+
+    /** 会话检索范围：新版按文件（{"scope":"DOCUMENT","ids":[...]}），旧版是空间 publicId 数组。 */
+    private record SearchScope(String type, List<String> ids) {}
+
+    private SearchScope scopeOf(String raw) {
+        if (raw != null && raw.trim().startsWith("{")) {
+            try {
+                JsonNode node = json.readTree(raw);
+                List<String> ids = new ArrayList<>();
+                node.path("ids").forEach(item -> ids.add(item.asText()));
+                return new SearchScope("DOCUMENT", ids);
+            } catch (Exception ignored) {
+                // 非法 JSON 按空间范围回退
+            }
+        }
+        try {
+            return new SearchScope("SPACE", json.readValue(raw, new TypeReference<>() {}));
+        } catch (Exception e) {
+            return new SearchScope("SPACE", List.of());
+        }
     }
 
     private QaSessionEntity ownedSession(String id) {
@@ -319,17 +434,20 @@ public class KnowledgeQaService {
         }
     }
 
+    private List<String> parseTitlePath(String raw) {
+        if (raw == null || raw.isBlank()) {
+            return List.of();
+        }
+        try {
+            return json.readValue(raw, new TypeReference<List<String>>() {});
+        } catch (Exception e) {
+            return List.of();
+        }
+    }
+
     private String preview(String text) {
         String value = text.replaceAll("\\s+", " ").trim();
         return value.substring(0, Math.min(300, value.length()));
-    }
-
-    private <T> T read(String value, TypeReference<T> type) {
-        try {
-            return json.readValue(value, type);
-        } catch (Exception e) {
-            throw new IllegalStateException(e);
-        }
     }
 
     private String toJson(Object value) {

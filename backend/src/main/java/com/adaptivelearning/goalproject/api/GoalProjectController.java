@@ -23,7 +23,9 @@ public class GoalProjectController {
     private final GoalProjectService service;
     private final GoalRecommendationService recommendationService;
 
-    public record GoalRequest(@NotNull Long directionId, @Size(min = 2, max = 100) String name, @NotBlank String type,
+    public record GoalRequest(Long directionId, @Size(max = 120) String customDirection,
+                              @Size(min = 2, max = 100) String name,
+                              @NotBlank @Pattern(regexp = "SKILL|PROJECT|EXAM") String type,
                               @Size(max = 2000) String description,
                               @Pattern(regexp = "LOW|MEDIUM|HIGH|URGENT") String priority,
                               @NotNull LocalDate startDate, @NotNull LocalDate dueDate,
@@ -32,7 +34,9 @@ public class GoalProjectController {
                               @Size(max = 1000) String changeReason,
                               @Pattern(regexp = "CUSTOM|AI_RECOMMENDED|RULE_RECOMMENDED") String sourceType,
                               Long profileVersionId, @Size(max = 80) String recommendationId,
-                              @Size(max = 500) String recommendationReason) {
+                              @Size(max = 500) String recommendationReason,
+                              @Size(max = 10) List<@NotBlank @Size(max = 120) String> milestones,
+                              @Size(max = 500) String repositoryUrl) {
     }
 
     public record RecommendationRequest(@Min(1) @Max(3) Integer count) { }
@@ -40,12 +44,15 @@ public class GoalProjectController {
     public record ActionRequest(@Size(max = 1000) String reason, boolean exceptionConfirmed) {
     }
 
+    public record CriterionRequest(boolean completed, @NotNull Integer version) { }
+
     public record ProjectRequest(Long primaryDirectionId, @NotBlank @Size(max = 120) String name,
                                  @Size(max = 2000) String description,
                                  @NotNull LocalDate startDate, @NotNull LocalDate dueDate,
                                  @Pattern(regexp = "LOW|MEDIUM|HIGH|URGENT") String priority,
                                  List<Map<String, Object>> deliverables, @Size(max = 500) String repositoryUrl,
-                                 Integer version) {
+                                 Integer version, String goalId,
+                                 @Size(max = 10) List<@NotBlank @Size(max = 120) String> milestones) {
     }
 
     public record LinkRequest(@NotBlank String goalId,
@@ -65,8 +72,8 @@ public class GoalProjectController {
 
     @PostMapping("/goals")
     @ResponseStatus(HttpStatus.CREATED)
-    public ApiResponse<LearningGoalEntity> createGoal(@Valid @RequestBody GoalRequest r) {
-        return ApiResponse.ok(service.createGoal(goal(r)));
+    public ApiResponse<GoalProjectService.CreateGoalResult> createGoal(@Valid @RequestBody GoalRequest r) {
+        return ApiResponse.ok(service.createGoalWithProject(goal(r), r.milestones(), r.repositoryUrl()));
     }
 
     @PostMapping("/goals/recommendations")
@@ -74,6 +81,11 @@ public class GoalProjectController {
             @Valid @RequestBody(required = false) RecommendationRequest request) {
         return ApiResponse.ok(recommendationService.recommend(request == null || request.count() == null
                 ? 3 : request.count()));
+    }
+
+    @GetMapping("/goals/recommendations/latest")
+    public ApiResponse<GoalRecommendationService.RecommendationResponse> latestRecommendations() {
+        return ApiResponse.ok(recommendationService.latest());
     }
 
     @GetMapping("/goals/{id}")
@@ -84,6 +96,12 @@ public class GoalProjectController {
     @PatchMapping("/goals/{id}")
     public ApiResponse<LearningGoalEntity> updateGoal(@PathVariable String id, @Valid @RequestBody GoalRequest r) {
         return ApiResponse.ok(service.updateGoal(id, goal(r)));
+    }
+
+    @PatchMapping("/goals/{id}/success-criteria/{index}")
+    public ApiResponse<LearningGoalEntity> criterion(@PathVariable String id, @PathVariable int index,
+                                                      @Valid @RequestBody CriterionRequest request) {
+        return ApiResponse.ok(service.setGoalCriterion(id, index, request.completed(), request.version()));
     }
 
     @PostMapping("/goals/{id}/activation")
@@ -121,10 +139,15 @@ public class GoalProjectController {
         return ApiResponse.ok(service.projects(page, pageSize, status));
     }
 
+    @GetMapping("/goals/{id}/projects")
+    public ApiResponse<List<LearningProjectEntity>> projectsForGoal(@PathVariable String id) {
+        return ApiResponse.ok(service.projectsForGoal(id));
+    }
+
     @PostMapping("/projects")
     @ResponseStatus(HttpStatus.CREATED)
     public ApiResponse<LearningProjectEntity> createProject(@Valid @RequestBody ProjectRequest r) {
-        return ApiResponse.ok(service.createProject(project(r)));
+        return ApiResponse.ok(service.createConfiguredProject(project(r), r.goalId(), r.milestones()));
     }
 
     @GetMapping("/projects/{id}")
@@ -182,8 +205,13 @@ public class GoalProjectController {
         return ApiResponse.ok(service.completeMilestone(id, evidence));
     }
 
+    @PostMapping("/milestones/{id}/cancellation")
+    public ApiResponse<MilestoneEntity> milestoneCancel(@PathVariable String id) {
+        return ApiResponse.ok(service.cancelMilestone(id));
+    }
+
     private GoalProjectService.GoalInput goal(GoalRequest r) {
-        return new GoalProjectService.GoalInput(r.directionId(), r.name(), r.type(), r.description(), r.priority(),
+        return new GoalProjectService.GoalInput(r.directionId(), r.customDirection(), r.name(), r.type(), r.description(), r.priority(),
                 r.startDate(), r.dueDate(), r.weeklyBudgetMinutes(), r.successCriteria(), r.version(),
                 r.changeReason(), r.sourceType(), r.profileVersionId(), r.recommendationId(),
                 r.recommendationReason());

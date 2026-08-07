@@ -15,8 +15,8 @@ spring:
     locations: classpath:db/migration/mysql
   servlet:
     multipart:
-      max-file-size: 50MB
-      max-request-size: 52MB
+      max-file-size: 200MB
+      max-request-size: 205MB
   jackson:
     default-property-inclusion: non_null
     time-zone: UTC
@@ -45,11 +45,13 @@ mybatis-plus:
       logic-not-delete-value: 'null'
 
 app:
+  model-secret:
+    encryption-key: ${MODEL_SECRET_ENCRYPTION_KEY:${JWT_SECRET:}}
   ai-service:
     enabled: ${AI_SERVICE_ENABLED:false}
     base-url: ${AI_SERVICE_BASE_URL:http://127.0.0.1:8090}
     internal-token: ${AI_INTERNAL_TOKEN:local-ai-internal-token-change-me-32}
-    timeout: ${AI_SERVICE_TIMEOUT:PT65S}
+    timeout: ${AI_SERVICE_TIMEOUT:PT330S}
     model-name: ${MODEL_NAME:}
   ai:
     enabled: ${MODEL_ENABLED:true}
@@ -94,18 +96,26 @@ app:
     verification-code-max-attempts: ${VERIFICATION_CODE_MAX_ATTEMPTS:5}
     verification-code-pepper: ${VERIFICATION_CODE_PEPPER:${JWT_SECRET:local-development-secret-change-before-production-123456}}
   planning:
-    capacity-ratio: 0.85
     confirmation-minutes: 30
     high-impact-task-threshold: 3
     impact-window-days: 14
     max-task-minutes: 120
+    auto-optimization-cooldown: ${AUTO_OPTIMIZATION_COOLDOWN:PT24H}
+  outbox:
+    poll-delay: ${OUTBOX_POLL_DELAY:PT5S}
   storage:
     root: ${STORAGE_ROOT:./data/objects}
+    clamav-host: ${CLAMAV_HOST:}
+    clamav-port: ${CLAMAV_PORT:3310}
+    antivirus-required: ${ANTIVIRUS_REQUIRED:false}
   rag:
     chunk-target-chars: 600
     chunk-max-chars: 1600
     top-k: 5
     python-fallback-enabled: ${AI_SERVICE_RAG_FALLBACK:true}
+  task-chat:
+    history-max-messages: ${TASK_CHAT_HISTORY_MAX_MESSAGES:400}
+    history-max-characters: ${TASK_CHAT_HISTORY_MAX_CHARACTERS:600000}
   cors:
     allowed-origins: ${CORS_ALLOWED_ORIGINS:http://localhost:5300,http://127.0.0.1:5300}
 

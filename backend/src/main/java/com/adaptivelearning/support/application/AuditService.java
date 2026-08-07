@@ -18,8 +18,14 @@ public class AuditService {
 
     public void record(String action, String resourceType, String resourceId,
                        String before, String after, String result) {
-        recordAs(SecurityUtils.currentUserIdOrSystem(), RequestIdFilter.currentRequestId(), clientIp(),
+        recordAs(SecurityUtils.currentUserIdOrSystem(), RequestIdFilter.currentRequestId(), currentClientIp(),
                 action, resourceType, resourceId, before, after, result);
+    }
+
+    /** 在请求线程内取好审计字段，供后台线程（如异步规划作业）显式传入 recordAs。 */
+    public String currentClientIp() {
+        String forwarded = request.getHeader("X-Forwarded-For");
+        return forwarded == null ? request.getRemoteAddr() : forwarded.split(",")[0].trim();
     }
 
     /** Records work completed after the HTTP request thread has returned (for example SSE generation). */
@@ -38,11 +44,6 @@ public class AuditService {
         log.setIp(ip);
         log.setCreatedAt(Instant.now());
         mapper.insert(log);
-    }
-
-    private String clientIp() {
-        String forwarded = request.getHeader("X-Forwarded-For");
-        return forwarded == null ? request.getRemoteAddr() : forwarded.split(",")[0].trim();
     }
 
     private String truncate(String value) {

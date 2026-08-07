@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+from typing import Any
+
+from langchain_core.prompts import PromptTemplate
+
 TASK_CHAT_PROMPT_VERSION = "task-chat-v1"
 
 TASK_CHAT_KNOWLEDGE_SYSTEM_PROMPT = """
@@ -19,3 +23,13 @@ TASK_CHAT_WEB_SYSTEM_PROMPT = """
 回答要求：紧扣当前任务主题，语气简洁直接，适合对话场景，篇幅控制在 300 字以内。
 直接输出中文答案，不输出 JSON，不输出参考资料列表（链接由系统展示）。
 """.strip()
+
+if PromptTemplate is not None:
+    TASK_CHAT_USER_TEMPLATE: Any = PromptTemplate.from_template(
+        "<task>当前任务：{task_title}（{task_type}）</task>\n"
+        "{dialog_block}"
+        "<{source_tag}>{source_json}</{source_tag}>\n"
+        "<question>{message}</question>"
+    )
+else:  # pragma: no cover
+    TASK_CHAT_USER_TEMPLATE = None
