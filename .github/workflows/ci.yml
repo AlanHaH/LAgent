@@ -72,4 +72,5 @@ jobs:
           MYSQL_PASSWORD: ci-app-password
           JWT_SECRET: ci-jwt-secret-with-at-least-thirty-two-characters
           QDRANT_API_KEY: ci-qdrant-secret
+          AI_INTERNAL_TOKEN: ci-ai-internal-token
         run: docker compose config --quiet
