@@ -1,10 +1,12 @@
 package com.adaptivelearning.planning.application;
 
 import com.adaptivelearning.execution.domain.LearningTaskEntity;
+import com.adaptivelearning.execution.application.TaskCancellationService;
 import com.adaptivelearning.execution.infrastructure.LearningTaskMapper;
 import com.adaptivelearning.goalproject.domain.LearningGoalEntity;
 import com.adaptivelearning.goalproject.infrastructure.GoalProjectMappers.GoalMapper;
 import com.adaptivelearning.planning.domain.LearningPlanEntity;
+import com.adaptivelearning.planning.domain.PlanChangeItemEntity;
 import com.adaptivelearning.planning.domain.PlanStageEntity;
 import com.adaptivelearning.planning.domain.PlanVersionEntity;
 import com.adaptivelearning.planning.domain.PlanningJobEntity;
@@ -16,6 +18,7 @@ import com.adaptivelearning.shared.exception.ErrorCode;
 import com.adaptivelearning.shared.security.CurrentUser;
 import com.adaptivelearning.support.application.AuditService;
 import com.adaptivelearning.support.application.HashingService;
+import com.adaptivelearning.support.infrastructure.UserMapper;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import org.junit.jupiter.api.AfterEach;
@@ -44,6 +47,7 @@ import java.time.ZonedDateTime;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
+import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.Executor;
@@ -51,7 +55,9 @@ import java.util.concurrent.Executor;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyDouble;
+import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
@@ -84,10 +90,17 @@ class PlanningJobAsyncTest {
     @Mock JdbcTemplate jdbc;
     @Mock AuditService audit;
     @Mock PlatformTransactionManager transactionManager;
+    @Mock UserMapper userMapper;
+    @Mock TaskCancellationService taskCancellation;
 
-    /** 可用时段不再参与排期，仅作为模型的每周时长软参考；测试可清空以验证软参考为 0 时不阻断规划 */
+    /** 正式排期必须使用画像可用时段。 */
     private final List<RuleBasedPlanner.Slot> slots = new ArrayList<>();
     private final List<Runnable> submitted = new ArrayList<>();
+    private final List<Map<String, Object>> catalogKnowledge = new ArrayList<>();
+    private final List<KnowledgePrerequisitePolicy.Dependency> catalogDependencies = new ArrayList<>();
+    private final List<Long> proficientKnowledgePointIds = new ArrayList<>();
+    private final List<Long> publishedTaskIds = new ArrayList<>();
+    private final ObjectMapper objectMapper = new ObjectMapper().registerModule(new JavaTimeModule());
     private PlanningService service;
 
     @BeforeEach
@@ -95,14 +108,40 @@ class PlanningJobAsyncTest {
         // SQL 分发桩：按语句特征返回对应的模拟数据（严格模式不会误报未用桩）
         lenient().when(jdbc.query(anyString(), any(ResultSetExtractor.class), any(Object[].class))).thenAnswer(inv -> {
             String sql = inv.getArgument(0);
-            if (sql.contains("p.timezone")) {
+            if (sql.contains("SELECT p.id,p.profile_status")) {
+                Map<String,Object> snapshot = new HashMap<>();
+                snapshot.put("timezone", "Asia/Shanghai");
+                snapshot.put("backgroundText", "Java 基础学习者");
+                snapshot.put("planStartDate", "2026-08-01");
+                snapshot.put("planEndDate", "2026-08-30");
+                snapshot.put("dailyRecommendedTasks", 2);
+                snapshot.put("directions", List.of(Map.of(
+                        "directionId", "1", "name", "Java 方向", "currentStage", "INTERMEDIATE",
+                        "primary", true, "sourceType", "CATALOG", "knowledgeBaseDirection", true)));
+                snapshot.put("preference", Map.of("capacityRatio", 0.85, "focusMinutes", 45));
+                snapshot.put("availabilityRules", slots.stream().map(slot -> Map.of(
+                        "weekday", slot.weekday(), "start", slot.start().toString(),
+                        "availableMinutes", slot.minutes())).toList());
+                snapshot.put("availabilityExceptions", List.of());
                 Map<String, Object> profile = new HashMap<>();
-                profile.put("profileVersion", 2);
-                profile.put("profileSnapshotVersion", 1);
-                profile.put("timezone", "Asia/Shanghai");
-                profile.put("backgroundText", null);
+                profile.put("profileId", 10L);
+                profile.put("status", "GENERATED");
+                profile.put("versionNo", 2);
+                profile.put("versionId", 20L);
+                profile.put("snapshotJson", objectMapper.writeValueAsString(snapshot));
                 return profile;
             }
+            if (sql.contains("FROM profile_version v JOIN user_profile p")) {
+                Map<String,Object> snapshot = new HashMap<>();
+                snapshot.put("timezone", "Asia/Shanghai");
+                snapshot.put("directions", List.of(Map.of(
+                        "directionId", "1", "name", "Java 方向", "currentStage", "ADVANCED",
+                        "primary", true, "sourceType", "CATALOG", "knowledgeBaseDirection", true)));
+                return Map.of("id", 15L, "versionNo", 1,
+                        "snapshotJson", objectMapper.writeValueAsString(snapshot));
+            }
+            if (sql.contains("SELECT id,profile_status FROM user_profile"))
+                return Map.of("id", 10L, "status", "GENERATED");
             if (sql.contains("learning_direction")) return "Java 方向";
             if (sql.contains("current_stage")) return "INTERMEDIATE";
             if (sql.contains("plan_publication")) return null; // 尚无已发布版本
@@ -112,25 +151,34 @@ class PlanningJobAsyncTest {
             String sql = inv.getArgument(0);
             if (sql.contains("weekday,start_time")) return slots;
             if (sql.contains("knowledge_point WHERE direction_id"))
-                return List.of(Map.of("id", 1L, "name", "Java 变量"));
+                return catalogKnowledge;
+            if (sql.contains("FROM knowledge_dependency")) return catalogDependencies;
+            if (sql.contains("FROM knowledge_mastery")) return proficientKnowledgePointIds;
+            if (sql.contains("SELECT id FROM learning_task")) return publishedTaskIds;
             if (sql.contains("reference_point")) return List.of();
             return List.of();
         });
         lenient().when(jdbc.queryForObject(anyString(), eq(Integer.class), any())).thenReturn(0);
         lenient().when(hashing.sha256(anyString())).thenReturn("req-hash");
         lenient().when(pythonAi.isConfigured()).thenReturn(true);
+        lenient().when(goalMapper.lockById(anyLong())).thenAnswer(inv -> activeGoal());
 
         slots.add(new RuleBasedPlanner.Slot(1, LocalTime.of(19, 0), 60)); // 周一晚间 1 小时
+        catalogKnowledge.add(Map.of("id", 1L, "name", "Java 变量"));
 
         doAnswer(inv -> { ((PlanningJobEntity) inv.getArgument(0)).setId(200L); return 1; }).when(jobMapper).insert(any(PlanningJobEntity.class));
         doAnswer(inv -> { ((LearningPlanEntity) inv.getArgument(0)).setId(300L); return 1; }).when(planMapper).insert(any(LearningPlanEntity.class));
+        lenient().when(planMapper.selectById(300L)).thenAnswer(inv -> {
+            LearningPlanEntity plan = new LearningPlanEntity(); plan.setId(300L); plan.setPublicId("plan-1");
+            plan.setUserId(1L); plan.setGoalId(100L); plan.setStatus("ACTIVE"); return plan;
+        });
         doAnswer(inv -> { ((PlanVersionEntity) inv.getArgument(0)).setId(400L); return 1; })
                 .when(versionMapper).insert(any(PlanVersionEntity.class));
 
         service = new PlanningService(goalMapper, planMapper, versionMapper, stageMapper, changeMapper,
                 validationMapper, confirmationMapper, jobMapper, publicationMapper, outboxMapper, taskMapper,
-                idempotency, ruleBasedPlanner, pythonAi, hashing, new ObjectMapper().registerModule(new JavaTimeModule()),
-                jdbc, audit, transactionManager);
+                idempotency, ruleBasedPlanner, pythonAi, hashing, objectMapper,
+                jdbc, audit, transactionManager, userMapper, taskCancellation);
         ReflectionTestUtils.setField(service, "planningJobExecutor", (Executor) submitted::add);
         SecurityContextHolder.getContext().setAuthentication(new UsernamePasswordAuthenticationToken(
                 new CurrentUser(1L, "user-pid", "tester", "pw", Set.of("LEARNER"), Set.of()), null));
@@ -178,9 +226,9 @@ class PlanningJobAsyncTest {
         when(jobMapper.selectOne(any())).thenReturn(null);
         when(jobMapper.selectList(any())).thenReturn(List.of());
         when(jobMapper.selectCount(any())).thenReturn(0L);
-        when(ruleBasedPlanner.schedule(any(), any(), any(), any(), any(), any(), any())).thenReturn(List.of(
+        when(ruleBasedPlanner.schedule(any(), any(), any(), any(), any(), any(), any(), any(), anyInt(), anyInt())).thenReturn(List.of(
 
-                new RuleBasedPlanner.TaskDraft("学习 Java 变量", "STUDY", "HIGH",
+                new RuleBasedPlanner.TaskDraft("学习 Java 变量", "LEARNING", "HIGH",
                         ZonedDateTime.of(2026, 8, 3, 19, 0, 0, 0, ZoneId.of("Asia/Shanghai")),
                         ZonedDateTime.of(2026, 8, 3, 20, 0, 0, 0, ZoneId.of("Asia/Shanghai")),
                         30, List.of(1L), List.of(), "掌握变量声明", List.of(), false,
@@ -190,7 +238,7 @@ class PlanningJobAsyncTest {
             assertThat(SecurityContextHolder.getContext().getAuthentication()).isNotNull();
             assertThat(((CurrentUser) SecurityContextHolder.getContext().getAuthentication().getPrincipal()).id()).isEqualTo(1L);
             return new PythonAiServiceClient.PlanRecommendationResult(List.of(
-                    new PythonAiServiceClient.PlanTaskItem("学习 Java 变量", "STUDY", "HIGH", 30,
+                    new PythonAiServiceClient.PlanTaskItem("学习 Java 变量", "LEARNING", "HIGH", 30,
                             List.of(1L), List.of(), "掌握变量声明", List.of(),
                             List.of("能写出变量声明"), "基础第一步")), "test-prompt-v1");
         });
@@ -239,24 +287,18 @@ class PlanningJobAsyncTest {
     }
 
     @Test
-    void workerSucceedsWithoutAvailabilityRules() throws Exception {
+    void workerFailsWithoutAvailabilityRules() throws Exception {
         slots.clear();
         when(goalMapper.selectOne(any())).thenReturn(activeGoal());
         when(goalMapper.selectById(100L)).thenReturn(activeGoal());
         when(jobMapper.selectOne(any())).thenReturn(null);
         when(jobMapper.selectList(any())).thenReturn(List.of());
         when(jobMapper.selectCount(any())).thenReturn(0L);
-        when(ruleBasedPlanner.schedule(any(), any(), any(), any(), any(), any(), any())).thenReturn(List.of(
-                new RuleBasedPlanner.TaskDraft("学习 Java 变量", "STUDY", "HIGH",
-                        ZonedDateTime.of(2026, 8, 3, 9, 0, 0, 0, ZoneId.of("Asia/Shanghai")),
-                        ZonedDateTime.of(2026, 8, 3, 9, 30, 0, 0, ZoneId.of("Asia/Shanghai")),
-                        30, List.of(1L), List.of(), "掌握变量声明", List.of(), false,
-                        List.of("能写出变量声明"), "基础第一步")));
         when(pythonAi.planRecommendations(any())).thenAnswer(inv -> {
             PythonAiServiceClient.PlanRecommendationRequest request = inv.getArgument(0);
-            assertThat(request.weeklyAvailableMinutes()).isZero(); // 无可用时段 → 软参考为 0，不再阻断规划
+            assertThat(request.weeklyAvailableMinutes()).isZero();
             return new PythonAiServiceClient.PlanRecommendationResult(List.of(
-                    new PythonAiServiceClient.PlanTaskItem("学习 Java 变量", "STUDY", "HIGH", 30,
+                    new PythonAiServiceClient.PlanTaskItem("学习 Java 变量", "LEARNING", "HIGH", 30,
                             List.of(1L), List.of(), "掌握变量声明", List.of(),
                             List.of("能写出变量声明"), "基础第一步")), "test-prompt-v1");
         });
@@ -264,8 +306,238 @@ class PlanningJobAsyncTest {
         PlanningJobEntity job = service.submitPlanningJob("goal-1", initialRequest(), "key-1");
         submitted.forEach(Runnable::run);
 
-        assertThat(job.getStatus()).isEqualTo("SUCCEEDED");
-        assertThat(job.getPlanVersionId()).isEqualTo(400L);
+        assertThat(failedUpdate().getStatus()).isEqualTo("FAILED");
+        assertThat(job.getPlanVersionId()).isNull();
+        verify(pythonAi, never()).planRecommendations(any());
+    }
+
+    @Test
+    void dualProfileVersionsAndSnapshotStageEnterPlanningContext() throws Exception {
+        LearningGoalEntity goal = activeGoal();
+        goal.setProfileVersionId(15L);
+        when(goalMapper.selectOne(any())).thenReturn(goal);
+        when(goalMapper.selectById(100L)).thenReturn(goal);
+        when(goalMapper.lockById(100L)).thenReturn(goal);
+        when(jobMapper.selectOne(any())).thenReturn(null);
+        when(jobMapper.selectList(any())).thenReturn(List.of());
+        when(jobMapper.selectCount(any())).thenReturn(0L);
+        when(ruleBasedPlanner.schedule(any(), any(), any(), any(), any(), any(), any(), any(), anyInt(), anyInt()))
+                .thenReturn(List.of(draft(new RuleBasedPlanner.TaskContent("学习 Java", "STUDY", "HIGH", 30,
+                        List.of(1L), List.of(), "掌握 Java", List.of(), false,
+                        List.of("完成练习"), "画像驱动"), 0)));
+        when(pythonAi.planRecommendations(any())).thenAnswer(inv -> {
+            PythonAiServiceClient.PlanRecommendationRequest request = inv.getArgument(0);
+            assertThat(request.currentStage()).isEqualTo("ADVANCED");
+            return new PythonAiServiceClient.PlanRecommendationResult(List.of(planTask("学习 Java", 1L)), "v1");
+        });
+
+        service.submitPlanningJob("goal-1", initialRequest(), "dual-profile");
+        submitted.forEach(Runnable::run);
+
+        ArgumentCaptor<PlanVersionEntity> captured = ArgumentCaptor.forClass(PlanVersionEntity.class);
+        verify(versionMapper).insert(captured.capture());
+        Map<String,Object> context = objectMapper.readValue(captured.getValue().getContextSnapshotJson(), Map.class);
+        assertThat(context).containsEntry("goalProfileVersionId", "15")
+                .containsEntry("goalProfileVersionNo", 1)
+                .containsEntry("semanticProfileSource", "GOAL_PROFILE_VERSION")
+                .containsEntry("schedulingProfileVersionId", "20")
+                .containsEntry("schedulingProfileVersionNo", 2);
+        assertThat(context).containsEntry("userId", "1").containsEntry("goalId", "100");
+        assertThat(context.get("planningContextFingerprint")).isNotNull();
+        verify(jdbc, never()).query(org.mockito.ArgumentMatchers.contains("user_profile_direction"),
+                any(ResultSetExtractor.class), any(Object[].class));
+    }
+
+    @Test
+    void optimizationStoresCompleteBeforeSnapshot() throws Exception {
+        LearningGoalEntity goal = activeGoal();
+        LearningTaskEntity current = new LearningTaskEntity();
+        current.setId(501L); current.setPublicId("task-501"); current.setUserId(1L);
+        current.setGoalId(100L); current.setProjectId(null); current.setTitle("旧任务");
+        current.setDescription("旧描述"); current.setTaskType("STUDY"); current.setPriority("MEDIUM");
+        current.setEstimatedMinutes(45); current.setScheduledStart(Instant.parse("2026-08-03T11:00:00Z"));
+        current.setDueAt(Instant.parse("2026-08-03T12:00:00Z")); current.setLockedSchedule(false);
+        current.setLifecycleStatus("NOT_STARTED"); current.setAcceptanceJson("[\"完成旧练习\"]"); current.setVersion(3);
+        when(goalMapper.selectOne(any())).thenReturn(goal);
+        when(goalMapper.selectById(100L)).thenReturn(goal);
+        when(goalMapper.lockById(100L)).thenReturn(goal);
+        when(jobMapper.selectOne(any())).thenReturn(null);
+        when(jobMapper.selectList(any())).thenReturn(List.of());
+        when(jobMapper.selectCount(any())).thenReturn(0L);
+        when(taskMapper.selectList(any())).thenReturn(List.of(current));
+        when(pythonAi.planRecommendations(any())).thenReturn(
+                new PythonAiServiceClient.PlanRecommendationResult(List.of(planTask("新任务", 1L)), "v1"));
+        when(ruleBasedPlanner.schedule(any(), any(), any(), any(), any(), any(), any(), any(), anyInt(), anyInt()))
+                .thenReturn(List.of(draft(new RuleBasedPlanner.TaskContent("新任务", "STUDY", "HIGH", 30,
+                        List.of(1L), List.of(), "新目标", List.of(), false,
+                        List.of("完成新练习"), "优化"), 0)));
+
+        service.submitPlanningJob("goal-1", new PlanningService.JobRequest(
+                "OPTIMIZATION", null, "调整", List.of()), "optimization-before");
+        submitted.forEach(Runnable::run);
+
+        ArgumentCaptor<PlanChangeItemEntity> captured = ArgumentCaptor.forClass(PlanChangeItemEntity.class);
+        verify(changeMapper).insert(captured.capture());
+        assertThat(captured.getValue().getAction()).isEqualTo("RESCHEDULE_TASK");
+        Map<String,Object> before = objectMapper.readValue(captured.getValue().getBeforeJson(), Map.class);
+        assertThat(before).containsKeys("title", "description", "taskType", "priority", "scheduledStart",
+                "dueAt", "estimatedMinutes", "lockedSchedule", "knowledgePointIds",
+                "knowledgeSources", "acceptanceCriteria");
+        assertThat(before).containsEntry("title", "旧任务").containsEntry("description", "旧描述");
+    }
+
+    @Test
+    void readsDependenciesAndProficientMasteryIntoPythonRequest() {
+        catalogKnowledge.clear();
+        catalogKnowledge.add(Map.of("id", 1L, "name", "A"));
+        catalogKnowledge.add(Map.of("id", 2L, "name", "B"));
+        catalogDependencies.add(new KnowledgePrerequisitePolicy.Dependency(1L, 2L));
+        proficientKnowledgePointIds.add(1L);
+        when(goalMapper.selectOne(any())).thenReturn(activeGoal());
+        when(goalMapper.selectById(100L)).thenReturn(activeGoal());
+        when(jobMapper.selectOne(any())).thenReturn(null);
+        when(jobMapper.selectList(any())).thenReturn(List.of());
+        when(jobMapper.selectCount(any())).thenReturn(0L);
+        when(pythonAi.planRecommendations(any())).thenAnswer(inv -> {
+            PythonAiServiceClient.PlanRecommendationRequest request = inv.getArgument(0);
+            assertThat(request.knowledgeDependencies()).containsExactly(
+                    new PythonAiServiceClient.KnowledgeDependency(1L, 2L));
+            assertThat(request.satisfiedPrerequisiteIds()).containsExactly(1L);
+            return new PythonAiServiceClient.PlanRecommendationResult(List.of(
+                    planTask("B", 2L), planTask("A review", 1L)), "test-prerequisite-v1");
+        });
+        when(ruleBasedPlanner.schedule(any(), any(), any(), any(), any(), any(), any(), any(), anyInt(), anyInt())).thenAnswer(inv -> {
+            List<RuleBasedPlanner.TaskContent> contents = inv.getArgument(0);
+            // PROFICIENT means B does not have to wait for the optional A review.
+            assertThat(contents).extracting(RuleBasedPlanner.TaskContent::title)
+                    .containsExactly("B", "A review");
+            return List.of(draft(contents.get(0), 0), draft(contents.get(1), 1));
+        });
+
+        service.submitPlanningJob("goal-1", initialRequest(), "dependency-key");
+        submitted.forEach(Runnable::run);
+
+        verify(jdbc).query(org.mockito.ArgumentMatchers.contains("FROM knowledge_dependency"),
+                any(RowMapper.class), eq(1L), eq(1L));
+        verify(jdbc).query(org.mockito.ArgumentMatchers.contains("level='PROFICIENT'"),
+                any(RowMapper.class), eq(1L));
+    }
+
+    @Test
+    void ordinaryReverseIsCorrectedBeforeRuleBasedScheduling() {
+        catalogKnowledge.clear();
+        catalogKnowledge.add(Map.of("id", 1L, "name", "A"));
+        catalogKnowledge.add(Map.of("id", 2L, "name", "B"));
+        catalogDependencies.add(new KnowledgePrerequisitePolicy.Dependency(1L, 2L));
+        when(goalMapper.selectOne(any())).thenReturn(activeGoal());
+        when(goalMapper.selectById(100L)).thenReturn(activeGoal());
+        when(jobMapper.selectOne(any())).thenReturn(null);
+        when(jobMapper.selectList(any())).thenReturn(List.of());
+        when(jobMapper.selectCount(any())).thenReturn(0L);
+        when(pythonAi.planRecommendations(any())).thenReturn(
+                new PythonAiServiceClient.PlanRecommendationResult(
+                        List.of(planTask("B", 2L), planTask("A", 1L)), "legacy-python"));
+        when(ruleBasedPlanner.schedule(any(), any(), any(), any(), any(), any(), any(), any(), anyInt(), anyInt())).thenAnswer(inv -> {
+            List<RuleBasedPlanner.TaskContent> contents = inv.getArgument(0);
+            assertThat(contents).extracting(RuleBasedPlanner.TaskContent::title)
+                    .containsExactly("A", "B");
+            return List.of(draft(contents.get(0), 0), draft(contents.get(1), 1));
+        });
+
+        service.submitPlanningJob("goal-1", initialRequest(), "reverse-key");
+        submitted.forEach(Runnable::run);
+    }
+
+    @Test
+    void customDirectionSendsEmptyPrerequisiteContext() {
+        LearningGoalEntity custom = activeGoal();
+        custom.setDirectionId(null);
+        custom.setCustomDirection("自定义探索");
+        when(goalMapper.selectOne(any())).thenReturn(custom);
+        when(goalMapper.selectById(100L)).thenReturn(custom);
+        when(goalMapper.lockById(100L)).thenReturn(custom);
+        when(jobMapper.selectOne(any())).thenReturn(null);
+        when(jobMapper.selectList(any())).thenReturn(List.of());
+        when(jobMapper.selectCount(any())).thenReturn(0L);
+        when(pythonAi.planRecommendations(any())).thenAnswer(inv -> {
+            PythonAiServiceClient.PlanRecommendationRequest request = inv.getArgument(0);
+            assertThat(request.explorationMode()).isTrue();
+            assertThat(request.knowledgeDependencies()).isEmpty();
+            assertThat(request.satisfiedPrerequisiteIds()).isEmpty();
+            return new PythonAiServiceClient.PlanRecommendationResult(
+                    List.of(planTask("探索", new Long[0])), "custom-v1");
+        });
+        when(ruleBasedPlanner.schedule(any(), any(), any(), any(), any(), any(), any(), any(), anyInt(), anyInt())).thenAnswer(inv -> {
+            List<RuleBasedPlanner.TaskContent> contents = inv.getArgument(0);
+            return List.of(draft(contents.get(0), 0));
+        });
+
+        service.submitPlanningJob("goal-1", initialRequest(), "custom-key");
+        submitted.forEach(Runnable::run);
+
+        verify(jdbc, never()).query(org.mockito.ArgumentMatchers.contains("FROM knowledge_dependency"),
+                any(RowMapper.class), any(Object[].class));
+    }
+
+    @Test
+    void tasksWithoutBusinessPrerequisiteAreNotForcedIntoLinearDependency() {
+        publishedTaskIds.addAll(List.of(11L, 12L, 13L));
+
+        ReflectionTestUtils.invokeMethod(service, "rebuildTaskDependencies", 100L, null, List.of());
+
+        verify(jdbc, never()).update(eq("INSERT INTO task_dependency(predecessor_task_id,successor_task_id) VALUES(?,?)"),
+                any(), any());
+    }
+
+    @Test
+    void stableClientRefsPersistMilestoneAndExactPrerequisiteEdge() throws Exception {
+        LearningPlanEntity plan = new LearningPlanEntity(); plan.setId(300L); plan.setUserId(1L);
+        plan.setGoalId(100L); plan.setProjectId(200L);
+        PlanVersionEntity version = new PlanVersionEntity(); version.setId(400L);
+        PlanChangeItemEntity first = change("task-a", null, "[]");
+        PlanChangeItemEntity second = change("task-b", null, "[\"task-a\"]");
+        doAnswer(inv -> { LearningTaskEntity task=inv.getArgument(0); task.setId(
+                "任务A".equals(task.getTitle())?501L:502L); return 1; }).when(taskMapper).insert(any(LearningTaskEntity.class));
+        List<String> changed = new ArrayList<>();
+
+        ReflectionTestUtils.invokeMethod(service,"applyChange",first,plan,version,changed);
+        ReflectionTestUtils.invokeMethod(service,"applyChange",second,plan,version,changed);
+        ReflectionTestUtils.invokeMethod(service,"rebuildTaskDependencies",100L,200L,List.of(first,second));
+
+        ArgumentCaptor<LearningTaskEntity> tasks=ArgumentCaptor.forClass(LearningTaskEntity.class);
+        verify(taskMapper,times(2)).insert(tasks.capture());
+        assertThat(tasks.getAllValues()).extracting(LearningTaskEntity::getMilestoneId).containsOnly(900L);
+        assertThat(first.getTargetTaskId()).isEqualTo(501L);
+        assertThat(second.getTargetTaskId()).isEqualTo(502L);
+        verify(jdbc).update("INSERT INTO task_dependency(predecessor_task_id,successor_task_id) VALUES(?,?)",501L,502L);
+    }
+
+    private PlanChangeItemEntity change(String clientRef,Long target,String dependencies) throws Exception {
+        Map<String,Object>after=new LinkedHashMap<>();after.put("clientRef",clientRef);
+        after.put("title","task-a".equals(clientRef)?"任务A":"任务B");after.put("description","目标");
+        after.put("taskType","LEARNING");after.put("priority","HIGH");after.put("estimatedMinutes",30);
+        after.put("scheduledStart","2026-08-10T08:00:00+08:00[Asia/Shanghai]");
+        after.put("dueAt","2026-08-10T09:00:00+08:00[Asia/Shanghai]");after.put("lockedSchedule",false);
+        after.put("milestoneId","900");after.put("knowledgePointIds",List.of());after.put("knowledgeSources",List.of());
+        after.put("acceptanceCriteria",List.of("提交成果"));after.put("dependencyTaskIds",objectMapper.readValue(dependencies,List.class));
+        PlanChangeItemEntity item=new PlanChangeItemEntity();item.setAction("ADD_TASK");item.setClientRef(clientRef);
+        item.setTargetTaskId(target);item.setAfterJson(objectMapper.writeValueAsString(after));item.setReason("test");return item;
+    }
+
+    private PythonAiServiceClient.PlanTaskItem planTask(String title, Long... knowledgePointIds) {
+        return new PythonAiServiceClient.PlanTaskItem(title, "LEARNING", "HIGH", 30,
+                List.of(knowledgePointIds), List.of(), "按前置顺序学习", List.of(),
+                List.of("完成可验收练习"), "保持前置顺序");
+    }
+
+    private RuleBasedPlanner.TaskDraft draft(RuleBasedPlanner.TaskContent content, int dayOffset) {
+        ZonedDateTime start = ZonedDateTime.of(2026, 8, 3 + dayOffset, 19, 0, 0, 0,
+                ZoneId.of("Asia/Shanghai"));
+        return new RuleBasedPlanner.TaskDraft(content.title(), content.taskType(), content.priority(),
+                start, start.plusMinutes(content.estimatedMinutes()), content.estimatedMinutes(),
+                content.knowledgePointIds(), content.knowledgeSources(), content.learningObjective(),
+                content.sourceQueries(), content.explorationRequired(), content.acceptance(),
+                content.reason());
     }
 
     @Test

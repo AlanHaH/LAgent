@@ -22,13 +22,14 @@
 
 后续目标与计划流程：
 
-4. 可直接 `POST /goals` 创建自定义目标。目录课程提交 `directionId`，目录外课程提交 `customDirection`，两者必须且只能填写一个；`sourceType=CUSTOM` 不要求方向已经写入画像，因此新用户可以先建立 `DRAFT` 草稿。目标页加载时调用 `GET /goals/recommendations/latest` 读取最近一次已保存推荐，不调用模型；只有用户明确点击推荐按钮时才调用 `POST /goals/recommendations` 生成并保存新批次。推荐链路要求当前已固化画像版本，目录方向与自定义方向都会作为合法上下文传给 Python。
-5. 用户选择候选并编辑确认后再 `POST /goals`，提交方向字段、`sourceType`、`profileVersionId`、`recommendationId` 和推荐理由。Java 校验画像版本归属，并确认推荐方向确实属于当前画像；自定义方向按规范化名称比对，不再要求存在于管理员目录。来源快照与正式目标一起保存；前端应把 `profileVersionId` 当作字符串原样回传，避免 JavaScript 长整型精度丢失。随后 `POST /goals/{id}/activation` 激活。
+4. 可直接 `POST /goals` 创建自定义目标。目录课程提交 `directionId`，目录外课程提交 `customDirection`，两者必须且只能填写一个；`sourceType=CUSTOM` 不要求方向已经写入画像，因此新用户可以先建立 `DRAFT` 草稿。目标页加载时调用 `GET /goals/recommendations/latest` 读取最近一次已保存推荐，不调用模型；只有用户明确点击推荐按钮时才调用 `POST /goals/recommendations`。推荐输入只由当前 `profile_version.snapshot_json` 重建；目录方向与自定义方向都会作为合法上下文传给 Python，自定义方向不映射公共目录。可恢复 AI 故障或输出校验失败时返回明确标记的确定性规则候选，所有方向已有同阶段活动目标时可返回空候选与业务提示。
+5. 用户选择候选并编辑确认后再 `POST /goals`，提交方向字段、`sourceType`、`profileVersionId` 和 `recommendationId`。Java 锁定当前画像并从当前用户的 `goal_recommendation_batch` 反查候选、批次来源和画像版本；客户端不能决定正式来源或原始推荐理由。用户可编辑目标业务字段，但必须重新通过 Java 日期、容量、方向、成功标准和项目结构校验。来源快照与正式目标一起保存；前端应把 `profileVersionId` 当作字符串原样回传。随后 `POST /goals/{id}/activation` 激活。
 6. 画像、偏好或可用时间被修改后，画像状态回到 `DRAFT`，必须生成新画像版本才能再次请求推荐；既有目标继续绑定创建时的旧画像版本，不被新画像静默改写。
-7. `POST /goals/{id}/planning-jobs` 异步提交生成隔离提案：请求必须携带唯一 `Idempotency-Key`，校验通过后立即返回 `QUEUED` 状态的作业，模型生成在后台线程执行（读取上下文与调用模型不持事务，写入在单个事务内一次提交）。前端轮询 `GET /planning-jobs/{jobId}`：`SUCCEEDED` 后通过 `GET /plan-versions/{planVersionId}` 读取提案，`FAILED` 返回 `errorCode`/`errorMessage`；页面刷新后可调用 `GET /goals/{goalId}/planning-jobs` 恢复轮询，超过 30 分钟的遗留 `QUEUED/RUNNING` 作业视为中断自动标记 `FAILED`。可在 `knowledgeSpaceIds` 显式提交最多 20 个知识空间。Java 只接受本人私有空间或可访问的公共空间，并把其中已完成索引的活动文档版本固化为上下文快照；Python 检索后要求每个任务返回真实 `sourceChunkIds`。
-8. `GET /plan-versions/{versionId}` 审阅阶段、变更与校验结果。
-9. `POST /plan-versions/{versionId}/confirmation-requests` 获取短时确认令牌。
-10. `POST /plan-versions/{versionId}/publication` 发布，必须同时提交确认令牌和新的 `Idempotency-Key`。
+7. 目标页使用 `/projects`、`/projects/{id}/goal-links`、`/projects/{id}/milestones` 和 `/goals/{id}/progress` 完成项目创建、草稿编辑、关联权重、里程碑结构、生命周期和进度展示。项目字段与结构仅 `DRAFT` 可改；`PAUSED` 必须先恢复才可完成。里程碑完成请求携带版本、总结和逐项确认，服务端以数据库 `acceptance_json` 为权威并用行锁保证重复/并发请求最多产生一次掌握度证据和 Outbox。
+8. `POST /goals/{id}/planning-jobs` 异步提交生成隔离提案：请求必须携带唯一 `Idempotency-Key`，校验通过后立即返回 `QUEUED` 状态的作业，模型生成在后台线程执行（读取上下文与调用模型不持事务，写入在单个事务内一次提交）。前端轮询 `GET /planning-jobs/{jobId}`：`SUCCEEDED` 后通过 `GET /plan-versions/{planVersionId}` 读取提案，`FAILED` 返回 `errorCode`/`errorMessage`；页面刷新后可调用 `GET /goals/{goalId}/planning-jobs` 恢复轮询，超过 30 分钟的遗留 `QUEUED/RUNNING` 作业视为中断自动标记 `FAILED`。可在 `knowledgeSpaceIds` 显式提交最多 20 个知识空间。Java 只接受本人私有空间或可访问的公共空间，并把其中已完成索引的活动文档版本固化为上下文快照；Python 检索后要求每个任务返回真实 `sourceChunkIds`。
+9. `GET /plan-versions/{versionId}` 审阅阶段、变更与校验结果。
+10. `POST /plan-versions/{versionId}/confirmation-requests` 获取短时确认令牌。
+11. `POST /plan-versions/{versionId}/publication` 发布，必须同时提交确认令牌和新的 `Idempotency-Key`。
 
 发布事务同时应用任务变更、更新正式版本、写发布记录、审计和 Outbox。失败时整体回滚。用户可以只勾选部分变更发布；Outbox 消费采用重试、退避和死信状态，任务完成与学习反馈会产生学习信号，并按冷却时间自动创建新的优化建议，仍需用户确认后才能发布。
 

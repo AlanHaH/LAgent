@@ -35,14 +35,19 @@ Agent 的边界是系统设计的一部分：它可以生成提案、解释与�
 
 ## 快速启动
 
+日常开发默认按[本地启动指南](docs/本地启动指南.md)在 Windows 本机手动启动，不使用 Docker：
+
 1. 复制 `.env.example` 为 `.env`，至少修改两个 MySQL 密码、`JWT_SECRET`、`AI_INTERNAL_TOKEN` 和 `QDRANT_API_KEY`。生产环境不要使用示例值，也不要复用这些密钥。
-2. 启动：
+2. 按[本地启动指南](docs/本地启动指南.md)依次启动 MySQL / Memurai、Python AI、Spring Boot 和前端。
+3. 打开 `http://localhost:5300`。后端 OpenAPI 在开发直连模式下位于 `http://localhost:8080/swagger-ui.html`。
 
-   ```bash
-   docker compose up --build -d
-   ```
+只有明确需要完整容器环境时，才使用 Docker：
 
-3. 打开 `http://localhost:8088` 进入公开宣传首页；登录页为 `http://localhost:8088/login`。后端 OpenAPI 在开发直连模式下位于 `http://localhost:8080/swagger-ui.html`。
+```bash
+docker compose up --build -d
+```
+
+Docker 模式启动后，打开 `http://localhost:8088` 进入公开宣传首页；登录页为 `http://localhost:8088/login`。
 
 只有设置了 `APP_ADMIN_PASSWORD` 才会初始化管理员。普通用户可从登录页注册。
 

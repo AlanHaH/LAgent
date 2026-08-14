@@ -818,7 +818,10 @@ async function promptStatus(item:any, status:string) {
                     <el-table-column label="解析方式" min-width="130"><template #default="{row:d}">{{d.parserVersion || '—'}}</template></el-table-column>
                     <el-table-column label="大小" width="90"><template #default="{row:d}">{{formatSize(d.fileSize)}}</template></el-table-column>
                     <el-table-column label="更新时间" min-width="165"><template #default="{row:d}">{{fmt(d.updatedAt)}}</template></el-table-column>
-                    <el-table-column label="操作" width="90"><template #default="{row:d}"><el-button link type="primary" @click="openDocumentContent(d, row)">查看内容</el-button></template></el-table-column>
+                    <el-table-column label="操作" width="130"><template #default="{row:d}">
+                      <el-button v-if="d.visibility==='PUBLIC'" link type="primary" @click="openDocumentContent(d, row)">查看内容</el-button>
+                      <span v-else class="muted">私有正文不可查看</span>
+                    </template></el-table-column>
                   </el-table>
                   <el-empty v-else-if="spaceDocsLoading!==row.publicId" description="该空间暂无文档" :image-size="60"/>
                 </div>

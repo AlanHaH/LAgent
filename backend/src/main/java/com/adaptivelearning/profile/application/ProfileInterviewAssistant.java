@@ -91,11 +91,12 @@ public class ProfileInterviewAssistant {
             try {
                 AiModelClient.Completion completion = pythonAi.profileTurnStreaming(userId, sessionId, current,
                         directions, recent(transcript), userMessage, ignored -> { });
-                AssistantTurn turn = withReadyPrompt(parseAiTurn(current, completion.content(), directions, userMessage));
+                AssistantTurn turn = validatedAiTurn(current, completion.content(), directions, userMessage);
                 safeRecordSuccess(userId, userMessage, completion);
                 return turn;
-            } catch (IllegalArgumentException e) {
-                safeRecordFailure(userId, userMessage, 0, "MODEL_OUTPUT_INVALID");
+            } catch (AiModelException e) {
+                if (!isFallbackEligible(e)) throw e;
+                safeRecordFailure(userId, userMessage, 0, e.getCode().name());
                 return guidedFallback(current, userMessage, directions);
             }
         }
@@ -104,11 +105,12 @@ public class ProfileInterviewAssistant {
             try {
                 AiModelClient.Completion completion = modelClient.complete(SYSTEM_PROMPT,
                         prompt(current, transcript, userMessage, directions));
-                AssistantTurn turn = withReadyPrompt(parseAiTurn(current, completion.content(), directions, userMessage));
+                AssistantTurn turn = validatedAiTurn(current, completion.content(), directions, userMessage);
                 safeRecordSuccess(userId, userMessage, completion);
                 return turn;
-            } catch (IllegalArgumentException e) {
-                safeRecordFailure(userId, userMessage, 0, "MODEL_OUTPUT_INVALID");
+            } catch (AiModelException e) {
+                if (!isFallbackEligible(e)) throw e;
+                safeRecordFailure(userId, userMessage, 0, e.getCode().name());
                 return guidedFallback(current, userMessage, directions);
             }
         }
@@ -135,18 +137,18 @@ public class ProfileInterviewAssistant {
                             visible.append(delta);
                             assistantOutput.delta(delta);
                         });
-                AssistantTurn parsed = parseAiTurn(current, completion.content(), directions, userMessage);
+                AssistantTurn parsed = validatedAiTurn(current, completion.content(), directions, userMessage);
                 AssistantTurn turn = withReadyPrompt(parsed, assistantOutput, visible.toString());
-                validateVisibleConsistency(turn);
                 safeRecordSuccess(userId, userMessage, completion);
                 return turn;
             } catch (AiStreamCancelledException e) {
                 throw e;
-            } catch (IllegalArgumentException e) {
-                safeRecordFailure(userId, userMessage, 0, "MODEL_OUTPUT_INVALID");
-                Draft fallback = deterministicExtract(current, userMessage, directions);
-                String message = visible.toString().isBlank() ? fallbackQuestion(fallback) : visible.toString();
-                return new AssistantTurn(message, fallback, visible.toString().isBlank() ? "GUIDED" : "AI");
+            } catch (AiModelException e) {
+                if (!isFallbackEligible(e)) throw e;
+                safeRecordFailure(userId, userMessage, 0, e.getCode().name());
+                AssistantTurn fallback = guidedFallback(current, userMessage, directions);
+                assistantOutput.replace(fallback.assistantMessage());
+                return fallback;
             }
         }
         if (modelClient.isConfigured()) {
@@ -155,25 +157,46 @@ public class ProfileInterviewAssistant {
             try {
                 AiModelClient.Completion completion = modelClient.completeStreaming(SYSTEM_PROMPT,
                         prompt(current, transcript, userMessage, directions), projector::accept);
-                AssistantTurn parsed = parseAiTurn(current, completion.content(), directions, userMessage);
-                AssistantTurn turn = withReadyPrompt(parsed);
-                validateVisibleConsistency(turn);
+                AssistantTurn turn = validatedAiTurn(current, completion.content(), directions, userMessage);
                 projector.complete(turn.assistantMessage());
                 safeRecordSuccess(userId, userMessage, completion);
                 return turn;
             } catch (AiStreamCancelledException e) {
                 throw e;
-            } catch (IllegalArgumentException e) {
-                safeRecordFailure(userId, userMessage, 0, "MODEL_OUTPUT_INVALID");
-                Draft fallback = deterministicExtract(current, userMessage, directions);
-                String visible = projector.emittedText();
-                return new AssistantTurn(visible.isBlank() ? fallbackQuestion(fallback) : visible,
-                        fallback, visible.isBlank() ? "GUIDED" : "AI");
+            } catch (AiModelException e) {
+                if (!isFallbackEligible(e)) throw e;
+                safeRecordFailure(userId, userMessage, 0, e.getCode().name());
+                AssistantTurn fallback = guidedFallback(current, userMessage, directions);
+                assistantOutput.replace(fallback.assistantMessage());
+                return fallback;
             }
         }
         AssistantTurn fallback = guidedFallback(current, userMessage, directions);
         assistantOutput.delta(fallback.assistantMessage());
         return fallback;
+    }
+
+    private AssistantTurn validatedAiTurn(Draft current, String content,
+                                          List<DirectionOption> directions, String userMessage) {
+        try {
+            AssistantTurn turn = withReadyPrompt(parseAiTurn(current, content, directions, userMessage));
+            validateVisibleConsistency(turn);
+            return turn;
+        } catch (IllegalArgumentException error) {
+            throw new AiModelException(ErrorCode.MODEL_OUTPUT_INVALID, error);
+        }
+    }
+
+    private boolean isFallbackEligible(AiModelException error) {
+        if (Set.of(ErrorCode.SERVICE_TEMPORARILY_UNAVAILABLE, ErrorCode.MODEL_REQUEST_TIMEOUT,
+                ErrorCode.MODEL_QUOTA_EXCEEDED, ErrorCode.MODEL_OUTPUT_INVALID).contains(error.getCode())) {
+            return true;
+        }
+        if (error.getCode() != ErrorCode.MODEL_PROVIDER_ERROR) return false;
+        Object pythonCode = error.getDetails().get("pythonCode");
+        if ("AI_PROVIDER_ERROR".equals(pythonCode)) return true;
+        Object providerStatus = error.getDetails().get("providerStatus");
+        return providerStatus instanceof Number status && status.intValue() >= 500;
     }
 
     public interface StreamOutput {
@@ -209,7 +232,7 @@ public class ProfileInterviewAssistant {
         void accept(String chunk) {
             if (closed || chunk == null || chunk.isEmpty()) return;
             raw.append(chunk);
-            if (raw.length() > 10_000) throw new IllegalArgumentException("AI response too large");
+            if (raw.length() > 10_000) throw new AiModelException(ErrorCode.MODEL_OUTPUT_INVALID);
             if (scanAt < 0) {
                 Matcher opening = OPENING.matcher(raw);
                 if (!opening.find()) return;
@@ -235,7 +258,7 @@ public class ProfileInterviewAssistant {
                     try {
                         next.append((char) Integer.parseInt(raw.substring(scanAt + 2, scanAt + 6), 16));
                     } catch (NumberFormatException e) {
-                        throw new IllegalArgumentException("Invalid JSON unicode escape", e);
+                        throw new AiModelException(ErrorCode.MODEL_OUTPUT_INVALID, e);
                     }
                     scanAt += 6;
                     continue;
@@ -249,7 +272,7 @@ public class ProfileInterviewAssistant {
                     case 'n' -> '\n';
                     case 'r' -> '\r';
                     case 't' -> '\t';
-                    default -> throw new IllegalArgumentException("Invalid JSON escape");
+                    default -> throw new AiModelException(ErrorCode.MODEL_OUTPUT_INVALID);
                 });
                 scanAt += 2;
             }

@@ -74,7 +74,7 @@ public class LearningBlockService {
             item.put("sourceType", "KNOWLEDGE_CHUNK");
             item.put("title", rs.getString("display_name"));
             item.put("documentId", rs.getString("public_id"));
-            item.put("chunkId", rs.getLong("id"));
+            item.put("chunkId", String.valueOf(rs.getLong("id")));
             item.put("chunkNo", rs.getInt("chunk_no"));
             item.put("quotePreview", abbreviate(rs.getString("text"), 500));
             item.put("pageFrom", rs.getObject("page_from"));
@@ -311,12 +311,22 @@ public class LearningBlockService {
         result.put("status", source.get("status"));result.put("passScore", source.get("passScore"));
         result.put("latestScore", source.get("latestScore"));result.put("attemptCount", source.get("attemptCount"));
         result.put("materialMarkdown", source.get("materialMarkdown"));
-        result.put("sources", listOfMaps(source.get("sourceManifestJson")));
+        result.put("sources", browserSources(listOfMaps(source.get("sourceManifestJson"))));
         result.put("sourceQueries", stringList(source.get("sourceQueriesJson")));
         result.put("exercises", listOfMaps(source.get("exercisesJson")));
         result.put("testQuestions", safeQuestions(listOfMaps(source.get("testJson"))));
         result.put("taskStatus", source.get("taskStatus"));
         result.put("effectiveSeconds", source.get("effectiveSeconds"));
+        return result;
+    }
+
+    private List<Map<String, Object>> browserSources(List<Map<String, Object>> sources) {
+        List<Map<String, Object>> result = new ArrayList<>();
+        for (Map<String, Object> source : sources) {
+            Map<String, Object> item = new LinkedHashMap<>(source);
+            if (item.get("chunkId") != null) item.put("chunkId", String.valueOf(item.get("chunkId")));
+            result.add(item);
+        }
         return result;
     }
 

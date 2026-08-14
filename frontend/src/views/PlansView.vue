@@ -509,14 +509,14 @@ function after(change: any) {
 
         <aside class="trust-console">
           <div class="trust-head">
-            <span class="trust-orb">{{ validations.every((item: any) => item.passed) ? '✓' : '!' }}</span>
+            <span class="trust-orb">{{ validations.every((item: any) => item.severity !== 'ERROR') ? '✓' : '!' }}</span>
             <div><span class="eyebrow">GUARDRAILS</span><h2>发布守门人</h2></div>
           </div>
           <p class="trust-intro">每一项都通过后，计划才会等待你的最终确认。Agent 不能越过这一步。</p>
           <div class="validation-stack">
-            <div v-for="validation in validations" :key="validation.ruleCode" :class="['validation-line', validation.passed ? 'passed' : 'failed']">
-              <i>{{ validation.passed ? '✓' : '!' }}</i>
-              <div><b>{{ validation.ruleCode }}</b><small>{{ validation.message }}</small></div>
+            <div v-for="validation in validations" :key="validation.validatorCode" :class="['validation-line', validation.severity === 'ERROR' ? 'failed' : 'passed']">
+              <i>{{ validation.severity === 'ERROR' ? '!' : '✓' }}</i>
+              <div><b>{{ validation.validatorCode }}</b><small>{{ validation.message }}</small></div>
             </div>
             <div v-if="!validations.length && canPublish" class="validation-line passed">
               <i>✓</i><div><b>全部约束已通过</b><small>任务、日期与冲突均符合要求，可以发布。</small></div>

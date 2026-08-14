@@ -1,5 +1,8 @@
 package com.adaptivelearning.profile.application;
 
+import com.fasterxml.jackson.databind.annotation.JsonSerialize;
+import com.fasterxml.jackson.databind.ser.std.ToStringSerializer;
+
 import java.math.BigDecimal;
 import java.time.LocalDate;
 import java.time.LocalTime;
@@ -16,7 +19,8 @@ public final class ProfileInterviewModels {
     public record SlotDraft(Integer weekday, LocalTime start, LocalTime end, String energyLevel) {}
 
     public record Draft(String timezone, Integer weekStart, LocalDate planStartDate, LocalDate planEndDate,
-                        Long directionId, String directionName, String customDirection, String currentStage,
+                        @JsonSerialize(using = ToStringSerializer.class) Long directionId,
+                        String directionName, String customDirection, String currentStage,
                         String backgroundText, PreferenceDraft preference, List<SlotDraft> availability,
                         Map<String, String> evidence) {}
 

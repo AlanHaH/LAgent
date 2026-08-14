@@ -38,7 +38,9 @@ async def test_goal_recommendations_are_profile_bound_and_capacity_limited() -> 
     assert result.recommendations[0].direction_id == 10
     assert result.recommendations[0].duration_days == 7
     assert result.recommendations[0].weekly_budget_minutes == 840
-    assert result.prompt_version == "goal-recommendation-v2"
+    assert result.prompt_version == "goal-recommendation-v3-profile-snapshot"
+    assert '"confidence":0.1' in model.user_prompts[0]
+    assert '"recommendedDifficulty":1' in model.user_prompts[0]
 
 
 @pytest.mark.asyncio
@@ -70,4 +72,26 @@ async def test_goal_recommendations_support_custom_profile_direction() -> None:
 
     assert result.recommendations[0].direction_id is None
     assert result.recommendations[0].custom_direction == "心理学"
-    assert result.prompt_version == "goal-recommendation-v2"
+    assert result.prompt_version == "goal-recommendation-v3-profile-snapshot"
+
+
+def test_goal_request_keeps_custom_direction_without_catalog_mapping() -> None:
+    request = GoalRecommendationRequest.model_validate({
+        "userId": 1,
+        "today": date(2026, 7, 23),
+        "profileVersionId": 100,
+        "profileVersionNo": 3,
+        "planStartDate": date(2026, 7, 23),
+        "planEndDate": date(2026, 7, 29),
+        "directions": [{"id": None, "name": " 经济 学自定义路线 ", "currentStage": "BEGINNER", "primary": True}],
+        "weeklyAvailableMinutes": 840,
+        "selfAssessmentCount": 2,
+        "confidence": 0.2,
+        "recommendedDifficulty": 2,
+        "dailyRecommendedTasks": 2,
+        "riskNotices": ["当前仅含自评证据，建议完成诊断"],
+    })
+
+    assert request.directions[0].id is None
+    assert request.directions[0].name == " 经济 学自定义路线 "
+    assert request.self_assessment_count == 2

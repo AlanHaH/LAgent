@@ -8,6 +8,7 @@ class FakeModelClient:
         self.answer = answer
         self._configured = configured
         self.calls = 0
+        self.user_prompts: list[str] = []
 
     @property
     def configured(self) -> bool:
@@ -27,8 +28,9 @@ class FakeModelClient:
         *,
         max_output_tokens: int | None = None,
     ) -> ModelCompletion:
-        del user_prompt, max_output_tokens
+        del max_output_tokens
         self.calls += 1
+        self.user_prompts.append(user_prompt)
         return self._result(self._content(system_prompt))
 
     async def complete_streaming(
@@ -39,8 +41,9 @@ class FakeModelClient:
         *,
         max_output_tokens: int | None = None,
     ) -> ModelCompletion:
-        del user_prompt, max_output_tokens
+        del max_output_tokens
         self.calls += 1
+        self.user_prompts.append(user_prompt)
         content = self._content(system_prompt)
         midpoint = max(1, len(content) // 2)
         await on_delta(content[:midpoint])

@@ -59,7 +59,35 @@ public class OutboxProcessor {
     private void dispatch(OutboxEventEntity event) {
         if ("LEARNING_TASK".equals(event.getAggregateType()) && "TaskStatusChanged".equals(event.getEventType())) {
             JsonNode payload = read(event.getPayloadJson());
-            if (!"COMPLETED".equals(payload.path("to").asText())) return;
+            String target = payload.path("to").asText();
+            String source = payload.path("source").asText("USER");
+            if ("CANCELED".equals(target)) {
+                if (!"USER".equals(source)) return;
+                List<Map<String, Object>> task = jdbc.queryForList("""
+                        SELECT task.user_id,task.goal_id,goal.status AS goal_status,
+                               EXISTS(
+                                 SELECT 1 FROM task_dependency dependency
+                                 JOIN learning_task successor ON successor.id=dependency.successor_task_id
+                                 WHERE dependency.predecessor_task_id=task.id
+                                   AND successor.user_id=task.user_id
+                                   AND successor.lifecycle_status NOT IN ('COMPLETED','CANCELED')
+                                   AND successor.deleted_at IS NULL
+                               ) has_successor
+                        FROM learning_task task
+                        JOIN learning_goal goal ON goal.id=task.goal_id AND goal.deleted_at IS NULL
+                        WHERE task.public_id=? AND task.deleted_at IS NULL
+                        """, event.getAggregateId());
+                if (task.isEmpty() || !"ACTIVE".equals(task.get(0).get("goal_status"))
+                        || ((Number) task.get(0).get("has_successor")).intValue() == 0) return;
+                long userId = ((Number) task.get(0).get("user_id")).longValue();
+                long goalId = ((Number) task.get(0).get("goal_id")).longValue();
+                planningService.submitAutomaticOptimization(userId, goalId, event.getCorrelationId());
+                notifications.create(userId, "PLAN_OPTIMIZATION", "前置任务已取消，需要重新规划",
+                        "后继任务仍保持阻塞。系统会生成待你审阅的优化提案，不会直接修改正式任务。",
+                        "GOAL", String.valueOf(goalId), "CANCELED_PREDECESSOR:" + event.getCorrelationId());
+                return;
+            }
+            if (!"COMPLETED".equals(target)) return;
             List<Map<String,Object>> task = jdbc.queryForList("""
                     SELECT task.user_id,task.goal_id,task.title,
                            EXISTS(SELECT 1 FROM learning_block block

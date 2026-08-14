@@ -16,7 +16,6 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.security.SecureRandom;
-import java.time.Duration;
 import java.time.Instant;
 import java.util.Base64;
 import java.util.Set;
@@ -31,14 +30,11 @@ public class AuthService {
     private final JwtService jwtService;
     private final HashingService hashingService;
     private final EmailVerificationService emailVerificationService;
+    private final LoginFailureService loginFailureService;
     private final SecureRandom random = new SecureRandom();
 
     @Value("${app.security.refresh-token-days:30}")
     private long refreshDays;
-    @Value("${app.security.login-max-failures:5}")
-    private int maxFailures;
-    @Value("${app.security.login-lock-minutes:15}")
-    private long lockMinutes;
 
     public record TokenPair(String accessToken, String refreshToken, long expiresIn, UserView user) {}
     public record UserView(String publicId, String username, String email, String timezone,
@@ -99,10 +95,8 @@ public class AuthService {
                     "验证码无效或已过期，请重新获取");
         }
         emailVerificationService.verifyAndConsume(email, EmailVerificationPurpose.PASSWORD_RESET, verificationCode);
-        user.setPasswordHash(passwordEncoder.encode(newPassword));
-        user.setLoginFailedCount(0);
-        user.setLockedUntil(null);
-        if (userMapper.updateById(user) != 1) {
+        if (userMapper.resetPasswordAndLoginLock(user.getId(), user.getVersion(),
+                passwordEncoder.encode(newPassword), Instant.now()) != 1) {
             throw new BusinessException(ErrorCode.RESOURCE_VERSION_CONFLICT, "账户已发生变更，请重新操作");
         }
         logoutAll(user.getId());
@@ -120,19 +114,13 @@ public class AuthService {
             throw new BusinessException(ErrorCode.AUTH_ACCOUNT_LOCKED, "登录失败次数过多，请稍后再试");
         }
         if (!passwordEncoder.matches(password, user.getPasswordHash())) {
-            int failures = user.getLoginFailedCount() == null ? 1 : user.getLoginFailedCount() + 1;
-            user.setLoginFailedCount(failures);
-            if (failures >= maxFailures) {
-                user.setLockedUntil(now.plus(Duration.ofMinutes(lockMinutes)));
-                user.setLoginFailedCount(0);
-            }
-            userMapper.updateById(user);
+            loginFailureService.record(user.getId());
             throw new BusinessException(ErrorCode.AUTH_INVALID_CREDENTIALS, "账号或密码错误");
         }
-        user.setLoginFailedCount(0);
-        user.setLockedUntil(null);
-        user.setLastLoginAt(now);
-        userMapper.updateById(user);
+        if (userMapper.recordLoginSuccess(user.getId(), now) != 1) {
+            throw new BusinessException(ErrorCode.AUTH_INVALID_CREDENTIALS, "账号或密码错误");
+        }
+        user = userMapper.selectById(user.getId());
         return issuePair(user, deviceId);
     }
 
@@ -156,7 +144,7 @@ public class AuthService {
         RefreshTokenEntity replacement = tokenMapper.selectOne(new LambdaQueryWrapper<RefreshTokenEntity>()
                 .eq(RefreshTokenEntity::getTokenHash, hashingService.sha256(pair.refreshToken())));
         if (replacement == null || tokenMapper.linkReplacement(old.getId(), old.getVersion() + 1,
-                replacement.getId()) != 1) {
+                replacement.getId(), Instant.now()) != 1) {
             throw new BusinessException(ErrorCode.RESOURCE_VERSION_CONFLICT, "刷新令牌轮换冲突，请重新登录");
         }
         return pair;
@@ -207,7 +195,7 @@ public class AuthService {
         token.setUserId(user.getId());
         token.setTokenHash(hashingService.sha256(refresh));
         token.setDeviceId(deviceId == null || deviceId.isBlank() ? "unknown" : deviceId.substring(0, Math.min(120, deviceId.length())));
-        token.setExpiresAt(Instant.now().plus(Duration.ofDays(refreshDays)));
+        token.setExpiresAt(Instant.now().plus(java.time.Duration.ofDays(refreshDays)));
         tokenMapper.insert(token);
         return new TokenPair(access, refresh, jwtService.expiresInSeconds(), view(user));
     }

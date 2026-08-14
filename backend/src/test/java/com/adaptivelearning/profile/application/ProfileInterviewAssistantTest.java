@@ -2,7 +2,10 @@ package com.adaptivelearning.profile.application;
 
 import com.adaptivelearning.profile.application.ProfileInterviewModels.*;
 import com.adaptivelearning.shared.ai.AiModelClient;
+import com.adaptivelearning.shared.ai.AiModelException;
 import com.adaptivelearning.shared.ai.ModelRunService;
+import com.adaptivelearning.shared.ai.PythonAiServiceClient;
+import com.adaptivelearning.shared.exception.ErrorCode;
 import com.adaptivelearning.shared.ratelimit.RedisRateLimiter;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
@@ -19,6 +22,114 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.Mockito.*;
 
 class ProfileInterviewAssistantTest {
+    @Test
+    void recoverableAiFailuresUseGuidedFallback() {
+        for (ErrorCode code : List.of(ErrorCode.SERVICE_TEMPORARILY_UNAVAILABLE,
+                ErrorCode.MODEL_REQUEST_TIMEOUT, ErrorCode.MODEL_QUOTA_EXCEEDED,
+                ErrorCode.MODEL_OUTPUT_INVALID)) {
+            PythonAiServiceClient python = mock(PythonAiServiceClient.class);
+            when(python.isConfigured()).thenReturn(true);
+            when(python.profileTurnStreaming(anyLong(), anyString(), any(), anyList(), anyList(), anyString(), any()))
+                    .thenThrow(new AiModelException(code));
+            ProfileInterviewAssistant assistant = assistantWithPython(python);
+
+            AssistantTurn turn = assistant.respond(1L, initialDraft(), List.of(),
+                    "我想学习计算机科学，零基础", List.of(new DirectionOption(10L, "CS", "计算机科学")));
+
+            assertThat(turn.mode()).isEqualTo("GUIDED");
+            assertThat(turn.draft().directionId()).isEqualTo(10L);
+        }
+    }
+
+    @Test
+    void providerServerFailureUsesGuidedFallbackButConfigurationFailureDoesNot() {
+        PythonAiServiceClient unavailable = failingPython(new AiModelException(ErrorCode.MODEL_PROVIDER_ERROR,
+                null, Map.of("pythonCode", "AI_PROVIDER_ERROR", "providerStatus", 503), null));
+        assertThat(assistantWithPython(unavailable).respond(1L, initialDraft(), List.of(),
+                "我想学习计算机科学，零基础", List.of(new DirectionOption(10L, "CS", "计算机科学"))).mode())
+                .isEqualTo("GUIDED");
+
+        PythonAiServiceClient configuration = failingPython(new AiModelException(ErrorCode.MODEL_PROVIDER_ERROR,
+                null, Map.of("pythonCode", "AI_PROVIDER_AUTH_FAILED", "providerStatus", 401), null));
+        assertThatThrownBy(() -> assistantWithPython(configuration).respond(1L, initialDraft(), List.of(),
+                "我想学习计算机科学，零基础", List.of(new DirectionOption(10L, "CS", "计算机科学"))))
+                .isInstanceOf(AiModelException.class);
+    }
+
+    @Test
+    void internalAuthenticationAndRequestContractFailuresDoNotFallback() {
+        for (String pythonCode : List.of("AI_INTERNAL_UNAUTHORIZED", "AI_REQUEST_INVALID", "AI_MODEL_NOT_FOUND")) {
+            PythonAiServiceClient python = failingPython(new AiModelException(ErrorCode.MODEL_PROVIDER_ERROR,
+                    null, Map.of("pythonCode", pythonCode), null));
+
+            assertThatThrownBy(() -> assistantWithPython(python).respond(1L, initialDraft(), List.of(),
+                    "我想学习计算机科学", List.of(new DirectionOption(10L, "CS", "计算机科学"))))
+                    .isInstanceOf(AiModelException.class);
+        }
+    }
+
+    @Test
+    void businessRateLimitIsNotConvertedToFallback() {
+        PythonAiServiceClient python = mock(PythonAiServiceClient.class);
+        when(python.isConfigured()).thenReturn(true);
+        RedisRateLimiter limiter = mock(RedisRateLimiter.class);
+        doThrow(new com.adaptivelearning.shared.exception.BusinessException(ErrorCode.RATE_LIMIT_EXCEEDED,
+                "too many requests")).when(limiter).requireModelAllowed(1L);
+        ProfileInterviewAssistant assistant = new ProfileInterviewAssistant(mock(AiModelClient.class), limiter,
+                new ObjectMapper().registerModule(new JavaTimeModule()), mock(ModelRunService.class));
+        assistant.setPythonAi(python);
+
+        assertThatThrownBy(() -> assistant.respond(1L, initialDraft(), List.of(), "学习 Java", List.of()))
+                .isInstanceOf(com.adaptivelearning.shared.exception.BusinessException.class);
+        verify(python, never()).profileTurnStreaming(anyLong(), anyString(), any(), anyList(), anyList(), anyString(), any());
+    }
+
+    @Test
+    void recoverableStreamingFailureReplacesPartialOutputAndCompletesAsGuided() {
+        PythonAiServiceClient python = mock(PythonAiServiceClient.class);
+        when(python.isConfigured()).thenReturn(true);
+        when(python.profileTurnStreaming(anyLong(), anyString(), any(), anyList(), anyList(), anyString(), any()))
+                .thenAnswer(invocation -> {
+                    @SuppressWarnings("unchecked") Consumer<String> delta = invocation.getArgument(6);
+                    delta.accept("未完成的 AI 文本");
+                    throw new AiModelException(ErrorCode.MODEL_REQUEST_TIMEOUT);
+                });
+        List<String> replaced = new ArrayList<>();
+
+        AssistantTurn turn = assistantWithPython(python).respondStreaming(1L, initialDraft(), List.of(),
+                "我想学习计算机科学，零基础", List.of(new DirectionOption(10L, "CS", "计算机科学")),
+                new ProfileInterviewAssistant.StreamOutput() {
+                    @Override public void delta(String text) { }
+                    @Override public void replace(String text) { replaced.add(text); }
+                });
+
+        assertThat(turn.mode()).isEqualTo("GUIDED");
+        assertThat(replaced).containsExactly(turn.assistantMessage());
+        assertThat(turn.draft().directionId()).isEqualTo(10L);
+    }
+
+    private ProfileInterviewAssistant assistantWithPython(PythonAiServiceClient python) {
+        ProfileInterviewAssistant assistant = new ProfileInterviewAssistant(mock(AiModelClient.class),
+                mock(RedisRateLimiter.class), new ObjectMapper().registerModule(new JavaTimeModule()),
+                mock(ModelRunService.class));
+        assistant.setPythonAi(python);
+        return assistant;
+    }
+
+    private PythonAiServiceClient failingPython(AiModelException error) {
+        PythonAiServiceClient python = mock(PythonAiServiceClient.class);
+        when(python.isConfigured()).thenReturn(true);
+        when(python.profileTurnStreaming(anyLong(), anyString(), any(), anyList(), anyList(), anyString(), any()))
+                .thenThrow(error);
+        return python;
+    }
+
+    private Draft initialDraft() {
+        return new Draft("Asia/Shanghai", 1, null, null, null, null, null, null, null,
+                new PreferenceDraft(List.of("TEXT"), "SOCRATIC", "MEDIUM", 45,
+                        new BigDecimal("0.85"), 1, 4, Map.of()), List.of(), Map.of());
+    }
+
     @Test
     void guidedFallbackExtractsCatalogStagePeriodAndTime() {
         AiModelClient model = mock(AiModelClient.class);
@@ -209,7 +320,7 @@ class ProfileInterviewAssistantTest {
     }
 
     @Test
-    void invalidStreamKeepsVisibleAiTextAndFallbackOnlyUpdatesDraft() {
+    void invalidStreamReplacesVisibleAiTextWithGuidedFallback() {
         AiModelClient model = mock(AiModelClient.class);
         when(model.isConfigured()).thenReturn(true);
         when(model.modelName()).thenReturn("test-model");
@@ -242,9 +353,9 @@ class ProfileInterviewAssistantTest {
                 });
 
         assertThat(String.join("", streamed)).contains("周期是30天");
-        assertThat(replacements).isEmpty();
-        assertThat(turn.assistantMessage()).contains("周期是30天");
-        assertThat(turn.mode()).isEqualTo("AI");
+        assertThat(replacements).containsExactly(turn.assistantMessage());
+        assertThat(turn.assistantMessage()).doesNotContain("周期是30天");
+        assertThat(turn.mode()).isEqualTo("GUIDED");
         assertThat(turn.draft().customDirection()).isEqualTo("Java 后端");
         assertThat(turn.draft().planStartDate()).hasToString("2026-08-01");
         assertThat(turn.draft().planEndDate()).hasToString("2026-09-30");

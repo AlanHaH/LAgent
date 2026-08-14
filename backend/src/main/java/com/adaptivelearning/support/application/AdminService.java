@@ -385,10 +385,27 @@ public class AdminService {
         List<Map<String, Object>> items = jdbc.queryForList("""
                 SELECT id,parent_id AS parentId,code,name,status,sort_no AS sortNo,version
                 FROM learning_direction
-                WHERE deleted_at IS NULL
+                WHERE status='ACTIVE' AND deleted_at IS NULL
                 ORDER BY sort_no,id
                 """);
         items.forEach(item -> stringifyIds(item, "id", "parentId"));
+        return items;
+    }
+
+    public List<Map<String, Object>> catalogKnowledgePoints(Long directionId) {
+        List<Map<String, Object>> items = jdbc.queryForList("""
+                SELECT k.id,k.direction_id AS directionId,k.parent_id AS parentId,k.code,k.name,k.level,
+                       k.default_weight AS defaultWeight,k.status,k.version,d.name AS directionName,
+                       p.name AS parentName
+                FROM knowledge_point k
+                JOIN learning_direction d ON d.id=k.direction_id
+                LEFT JOIN knowledge_point p ON p.id=k.parent_id AND p.deleted_at IS NULL
+                WHERE k.status='ACTIVE' AND k.deleted_at IS NULL
+                  AND d.status='ACTIVE' AND d.deleted_at IS NULL
+                  AND (? IS NULL OR k.direction_id=?)
+                ORDER BY d.sort_no,k.level,k.id
+                """, directionId, directionId);
+        items.forEach(item -> stringifyIds(item, "id", "directionId", "parentId"));
         return items;
     }
 
@@ -400,6 +417,8 @@ public class AdminService {
             bad("方向字段不合法");
         if (id != null && Objects.equals(id, parentId)) bad("方向不能把自己设为父级");
         long entityId = id == null ? IdWorker.getId() : id;
+        requireDirectionParent(entityId, parentId);
+        requireDirectionHierarchyAcyclic(entityId, parentId);
         try {
             if (id == null) {
                 jdbc.update("""
@@ -462,12 +481,16 @@ public class AdminService {
                 "SELECT COUNT(*) FROM learning_direction WHERE id=? AND deleted_at IS NULL", Long.class, directionId);
         if (directionExists == null || directionExists == 0) bad("学习方向不存在");
         if (parentId != null) {
-            Long parentDirection = jdbc.query(
+            List<Long> parentDirections = jdbc.query(
                     "SELECT direction_id FROM knowledge_point WHERE id=? AND deleted_at IS NULL",
-                    rs -> rs.next() ? rs.getLong(1) : null, parentId);
+                    (rs, row) -> rs.getLong(1), parentId);
+            if (parentDirections.isEmpty()) bad("父知识点不存在");
+            Long parentDirection = parentDirections.get(0);
             if (!Objects.equals(parentDirection, directionId)) bad("父知识点必须属于同一学习方向");
         }
         long entityId = id == null ? IdWorker.getId() : id;
+        requireKnowledgeHierarchyAcyclic(entityId, parentId);
+        if (id != null) requireKnowledgeDirectionMoveValid(id, directionId);
         try {
             if (id == null) {
                 jdbc.update("""
@@ -551,6 +574,64 @@ public class AdminService {
         if (changed == 0) notFound();
         audit.record("KNOWLEDGE_DEPENDENCY_DELETE", "KNOWLEDGE_DEPENDENCY",
                 predecessor + "->" + successor, "PREREQUISITE", null, "SUCCESS");
+    }
+
+    private void requireDirectionParent(long entityId, Long parentId) {
+        if (parentId == null) return;
+        Long count = jdbc.queryForObject(
+                "SELECT COUNT(*) FROM learning_direction WHERE id=? AND deleted_at IS NULL",
+                Long.class, parentId);
+        if (count == null || count == 0) bad("父方向不存在或已删除");
+        if (entityId == parentId) bad("方向不能把自己设为父级");
+    }
+
+    private void requireDirectionHierarchyAcyclic(long entityId, Long parentId) {
+        List<DependencyGraphPolicy.Edge> edges = jdbc.query("""
+                SELECT parent_id,id FROM learning_direction
+                WHERE parent_id IS NOT NULL AND deleted_at IS NULL AND id<>?
+                """, (rs, row) -> new DependencyGraphPolicy.Edge(rs.getLong(1), rs.getLong(2)), entityId);
+        edges = new ArrayList<>(edges);
+        if (parentId != null) edges.add(new DependencyGraphPolicy.Edge(parentId, entityId));
+        DependencyGraphPolicy.requireAcyclic(edges);
+    }
+
+    private void requireKnowledgeHierarchyAcyclic(long entityId, Long parentId) {
+        List<DependencyGraphPolicy.Edge> edges = jdbc.query("""
+                SELECT parent_id,id FROM knowledge_point
+                WHERE parent_id IS NOT NULL AND deleted_at IS NULL AND id<>?
+                """, (rs, row) -> new DependencyGraphPolicy.Edge(rs.getLong(1), rs.getLong(2)), entityId);
+        edges = new ArrayList<>(edges);
+        if (parentId != null) edges.add(new DependencyGraphPolicy.Edge(parentId, entityId));
+        DependencyGraphPolicy.requireAcyclic(edges);
+    }
+
+    private void requireKnowledgeDirectionMoveValid(long knowledgePointId, long newDirectionId) {
+        List<Long> currentDirections = jdbc.query(
+                "SELECT direction_id FROM knowledge_point WHERE id=? AND deleted_at IS NULL",
+                (rs, row) -> rs.getLong(1), knowledgePointId);
+        if (currentDirections.isEmpty()) notFound();
+        if (Objects.equals(currentDirections.get(0), newDirectionId)) return;
+
+        Long incompatibleChildren = jdbc.queryForObject("""
+                SELECT COUNT(*) FROM knowledge_point
+                WHERE parent_id=? AND direction_id<>? AND deleted_at IS NULL
+                """, Long.class, knowledgePointId, newDirectionId);
+        if (incompatibleChildren != null && incompatibleChildren > 0)
+            bad("修改知识点方向会破坏现有父子关系");
+
+        Long incompatibleDependencies = jdbc.queryForObject("""
+                SELECT COUNT(*)
+                FROM knowledge_dependency dependency
+                JOIN knowledge_point counterpart
+                  ON counterpart.id=CASE
+                    WHEN dependency.predecessor_id=? THEN dependency.successor_id
+                    ELSE dependency.predecessor_id
+                  END
+                WHERE (dependency.predecessor_id=? OR dependency.successor_id=?)
+                  AND counterpart.direction_id<>?
+                """, Long.class, knowledgePointId, knowledgePointId, knowledgePointId, newDirectionId);
+        if (incompatibleDependencies != null && incompatibleDependencies > 0)
+            bad("修改知识点方向会破坏已有知识依赖的同方向约束");
     }
 
     public QuestionEntity publicQuestion(AssessmentService.QuestionInput input) {
@@ -1239,8 +1320,15 @@ public class AdminService {
                 """, spacePublicId);
     }
 
-    /** 指定文档（任意用户）当前版本的全部切块内容，用于管理员预览。 */
+    /** 指定公开文档当前版本的全部切块内容；私有文档正文不向管理员开放。 */
     public List<Map<String, Object>> adminDocumentContent(String documentPublicId) {
+        Long readable = jdbc.queryForObject("""
+                SELECT COUNT(*)
+                FROM knowledge_document doc
+                JOIN knowledge_space s ON s.id=doc.space_id AND s.deleted_at IS NULL
+                WHERE doc.public_id=? AND doc.visibility='PUBLIC' AND doc.deleted_at IS NULL
+                """, Long.class, documentPublicId);
+        if (readable == null || readable == 0) notFound();
         return jdbc.queryForList("""
                 SELECT c.chunk_no AS chunkNo,c.text,c.token_count AS tokenCount,
                        c.page_from AS pageFrom,c.page_to AS pageTo,
@@ -1248,8 +1336,10 @@ public class AdminService {
                        c.title_path_json AS titlePath
                 FROM knowledge_chunk c
                 JOIN document_version v ON v.id=c.document_version_id
-                JOIN knowledge_document doc ON doc.id=v.document_id
-                WHERE doc.public_id=? AND v.version_no=doc.active_version_no
+                JOIN knowledge_document doc ON doc.id=v.document_id AND doc.deleted_at IS NULL
+                JOIN knowledge_space s ON s.id=doc.space_id AND s.deleted_at IS NULL
+                WHERE doc.public_id=? AND doc.visibility='PUBLIC'
+                  AND v.version_no=doc.active_version_no
                 ORDER BY c.chunk_no
                 """, documentPublicId);
     }

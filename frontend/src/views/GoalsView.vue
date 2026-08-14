@@ -7,20 +7,21 @@ import { api, idempotencyKey } from '../api/http'
 
 const router = useRouter()
 
-type Direction = { id: number | string; name: string; currentStage?: string; primary?: boolean; source: 'PROFILE' | 'CATALOG'; custom?: boolean }
+type Direction = { id: string; name: string; currentStage?: string; primary?: boolean; source: 'PROFILE' | 'CATALOG'; custom?: boolean }
 type ProfileView = {
   status: string
   currentVersionNo: number
   planStartDate: string
   planEndDate: string
-  directions: Array<{ directionId?: number; name?: string; customDirection?: string; currentStage: string; primary: boolean }>
+  directions: Array<{ directionId?: string; name?: string; customDirection?: string; currentStage: string; primary: boolean }>
 }
-type CatalogDirection = { id: number; name: string; status: string; parent_id?: number; parentId?: number }
+type CatalogDirection = { id: string; name: string; status: string; parent_id?: string; parentId?: string }
 type Recommendation = {
   id: string
-  directionId?: number
+  directionId?: string
   customDirection?: string
   directionName: string
+  currentStage: string
   name: string
   type: string
   description: string
@@ -39,21 +40,31 @@ type RecommendationResponse = {
   generatedAt: string
   source: 'AI' | 'RULE_FALLBACK'
   recommendations: Recommendation[]
+  message?: string
 }
+type GoalLink = { goalId: string; goalName: string; goalStatus: string; contributionWeight: number }
 
 const tab = ref<'skill' | 'project' | 'exam'>('skill')
 const goals = ref<any[]>([])
 const projects = ref<any[]>([])
 const projectMilestones = ref<Record<string, any[]>>({})
-const projectGoalIds = ref<Record<string, string>>({})
+const projectGoalLinks = ref<Record<string, GoalLink[]>>({})
+const goalProgress = ref<Record<string, any>>({})
 const profile = ref<ProfileView | null>(null)
 const directions = ref<Direction[]>([])
+const catalog = ref<CatalogDirection[]>([])
 const profileDirections = ref<Direction[]>([])
 const recommendations = ref<Recommendation[]>([])
 const recommendationMeta = ref<RecommendationResponse | null>(null)
 const recommending = ref(false)
 const dialog = ref(false)
 const loading = ref(false)
+const projectDialog = ref(false)
+const projectSaving = ref(false)
+const editingProjectId = ref<string | null>(null)
+const projectForm = reactive<any>({})
+const linkGoalSelection = reactive<Record<string, string>>({})
+const linkWeight = reactive<Record<string, number>>({})
 const completedCollapsed = ref(true)
 const skillGoals = computed(() => goals.value.filter((g) => g.type !== 'PROJECT' && g.type !== 'EXAM'))
 const projectGoals = computed(() => goals.value.filter((g) => g.type === 'PROJECT'))
@@ -103,21 +114,25 @@ async function load() {
   ])
   goals.value = goalPage.items
   projects.value = projectPage.items
-  const goalProjectEntries = await Promise.all(goals.value.map(async (goal:any) => [
-    goal.publicId, await api<any[]>({ url:`/goals/${goal.publicId}/projects` }),
-  ] as const))
-  projectGoalIds.value = Object.fromEntries(goalProjectEntries.flatMap(([goalId, linkedProjects]) =>
-    linkedProjects.map((project:any) => [project.publicId, goalId]),
-  ))
-  const milestoneEntries = await Promise.all(projects.value.map(async (project:any) => [
-    project.publicId, await api<any[]>({ url:`/projects/${project.publicId}/milestones` }),
-  ] as const))
+  const [milestoneEntries, linkEntries, progressEntries] = await Promise.all([
+    Promise.all(projects.value.map(async (project:any) => [
+      project.publicId, await api<any[]>({ url:`/projects/${project.publicId}/milestones` }),
+    ] as const)),
+    Promise.all(projects.value.map(async (project:any) => [
+      project.publicId, await api<GoalLink[]>({ url:`/projects/${project.publicId}/goal-links` }),
+    ] as const)),
+    Promise.all(goals.value.map(async (goal:any) => [
+      goal.publicId, await api<any>({ url:`/goals/${goal.publicId}/progress` }),
+    ] as const)),
+  ])
   projectMilestones.value = Object.fromEntries(milestoneEntries)
+  projectGoalLinks.value = Object.fromEntries(linkEntries)
+  goalProgress.value = Object.fromEntries(progressEntries)
   profile.value = currentProfile
   const currentDirections: Direction[] = []
   for (const item of currentProfile?.directions || []) {
     if (item.directionId && item.name) {
-      currentDirections.push({ id: Number(item.directionId), name: item.name, currentStage: item.currentStage, primary: item.primary, source: 'PROFILE' })
+      currentDirections.push({ id: String(item.directionId), name: item.name, currentStage: item.currentStage, primary: item.primary, source: 'PROFILE' })
     } else if (item.customDirection?.trim()) {
       const custom = item.customDirection.trim()
       currentDirections.push({ id: `custom:${custom}`, name: custom, currentStage: item.currentStage, primary: item.primary, source: 'PROFILE', custom: true })
@@ -126,7 +141,8 @@ async function load() {
   profileDirections.value = currentDirections
   const activeCatalog = (catalogDirections || [])
     .filter((item) => item.status === 'ACTIVE')
-    .map((item) => ({ id: Number(item.id), name: item.name, source: 'CATALOG' as const }))
+    .map((item) => ({ id: String(item.id), name: item.name, source: 'CATALOG' as const }))
+  catalog.value = (catalogDirections || []).filter((item) => item.status === 'ACTIVE')
   directions.value = profileDirections.value.length ? profileDirections.value : activeCatalog
   recommendationMeta.value = latestRecommendation
   recommendations.value = latestRecommendation?.recommendations || []
@@ -146,12 +162,17 @@ async function recommendGoals() {
     })
     recommendationMeta.value = result
     recommendations.value = result.recommendations
+    if (result.message) ElMessage.info(result.message)
   } catch (e) {
     // AI 不可用时全局拦截器已弹出错误提示，不渲染兜底推荐
   } finally { recommending.value = false }
 }
 
 function useRecommendation(item: Recommendation) {
+  if (recommendationOutdated.value || profile.value?.status !== 'GENERATED') {
+    ElMessage.warning('画像已变化，请重新生成目标推荐后再采用')
+    return
+  }
   resetForm(item.type)
   Object.assign(form, {
     directionId: item.directionId ?? `custom:${item.customDirection}`,
@@ -186,9 +207,10 @@ async function save() {
   let firstCreatedGoal: any
   loading.value = true
   try {
-    const selected = form.directionId
-    const directionId = typeof selected === 'number' ? selected : undefined
-    const customDirection = directionId === undefined
+    const selected = String(form.directionId)
+    const isCatalogDirection = directions.value.some((item) => !item.custom && item.id === selected)
+    const directionId = isCatalogDirection ? selected : undefined
+    const customDirection = !isCatalogDirection
       ? String(selected).replace(/^custom:/, '').trim()
       : undefined
     const created = await api<any>({
@@ -216,11 +238,15 @@ async function save() {
 }
 
 async function completeMilestone(project:any, milestone:any) {
-  const evidence = await ElMessageBox.prompt('写下用于验收这个里程碑的成果或证据', '完成里程碑', {
+  const required=milestoneCriteria(milestone).map((item:any,index:number)=>`${index+1}. ${item.description || item.name || '验收条件'}`).join('\n')
+  const evidence = await ElMessageBox.prompt(`请逐项核对数据库验收条件：\n${required}\n\n写下用于验收的成果或证据`, '完成里程碑', {
     inputType:'textarea', inputValidator:(value)=>Boolean(value?.trim()) || '请填写验收证据',
   }).then(result=>result.value).catch(()=>null)
   if (!evidence) return
-  await api({ method:'POST', url:`/milestones/${milestone.publicId}/completion`, data:{ summary:evidence, allConfirmed:true } })
+  const criteria = milestoneCriteria(milestone).map((_:any,index:number)=>({ index, confirmed:true, evidence }))
+  await api({ method:'POST', url:`/milestones/${milestone.publicId}/completion`, data:{
+    version: milestone.version, summary:evidence, criteria,
+  } })
   ElMessage.success('里程碑已完成，关联目标进度已同步更新')
   await load()
 }
@@ -323,11 +349,135 @@ async function projectAction(project: any, value: string) {
 }
 
 function projectsForGoal(goal: any) {
-  return projects.value.filter((project:any) => projectGoalIds.value[project.publicId] === goal.publicId)
+  return projects.value.filter((project:any) =>
+    (projectGoalLinks.value[project.publicId] || []).some((link) => link.goalId === goal.publicId))
+}
+
+function milestoneCriteria(milestone:any):any[] {
+  try { return JSON.parse(milestone.acceptanceJson || '[]') } catch { return [] }
+}
+
+function resetProjectForm(project?:any) {
+  editingProjectId.value = project?.publicId || null
+  Object.assign(projectForm, {
+    primaryDirectionId: project?.primaryDirectionId || undefined,
+    name: project?.name || '', description: project?.description || '',
+    startDate: project?.startDate || dayjs().format('YYYY-MM-DD'),
+    dueDate: project?.dueDate || dayjs().add(30,'day').format('YYYY-MM-DD'),
+    priority: project?.priority || 'MEDIUM', repositoryUrl: project?.repositoryUrl || '',
+    deliverablesText: project ? (parseJsonList(project.deliverableJson).map((item:any)=>item.name || item.description).filter(Boolean).join('\n')) : '项目成果',
+    goalId: project ? undefined : goals.value.find((goal)=>!['COMPLETED','CANCELED'].includes(goal.status))?.publicId,
+    milestonesText: project ? '' : '明确需求与验收标准\n完成核心成果\n验收与复盘',
+    version: project?.version,
+  })
+  projectDialog.value = true
+}
+
+function parseJsonList(value:string):any[] {
+  try { const parsed=JSON.parse(value || '[]'); return Array.isArray(parsed) ? parsed : [] } catch { return [] }
+}
+
+async function saveProject() {
+  if (!String(projectForm.name || '').trim()) return void ElMessage.warning('请填写项目名称')
+  const milestones = String(projectForm.milestonesText || '').split(/\r?\n/).map((value)=>value.trim()).filter(Boolean)
+  if (!editingProjectId.value && (!projectForm.goalId || !milestones.length)) {
+    return void ElMessage.warning('新项目必须关联目标并至少设置一个里程碑')
+  }
+  projectSaving.value = true
+  try {
+    const payload = {
+      primaryDirectionId: projectForm.primaryDirectionId || undefined,
+      name: projectForm.name.trim(), description: projectForm.description,
+      startDate: projectForm.startDate, dueDate: projectForm.dueDate, priority: projectForm.priority,
+      deliverables: String(projectForm.deliverablesText || '').split(/\r?\n/).map((name)=>name.trim()).filter(Boolean).map((name)=>({name})),
+      repositoryUrl: projectForm.repositoryUrl || undefined, version: projectForm.version,
+      goalId: projectForm.goalId, milestones,
+    }
+    await api({ method:editingProjectId.value ? 'PATCH' : 'POST',
+      url:editingProjectId.value ? `/projects/${editingProjectId.value}` : '/projects', data:payload })
+    projectDialog.value=false
+    ElMessage.success(editingProjectId.value ? '项目已更新' : '项目已创建')
+    await load()
+  } finally { projectSaving.value=false }
+}
+
+async function addGoalLink(project:any) {
+  const goalId=linkGoalSelection[project.publicId]
+  const weight=Number(linkWeight[project.publicId] || 1)
+  if (!goalId) return void ElMessage.warning('请选择目标')
+  await api({method:'POST',url:`/projects/${project.publicId}/goal-links`,data:{goalId,contributionWeight:weight}})
+  ElMessage.success('目标关联已保存')
+  await load()
+}
+
+async function updateGoalLink(project:any, link:GoalLink) {
+  const value=await ElMessageBox.prompt('输入该项目对目标的贡献权重（0-1）','修改贡献权重',{
+    inputValue:String(link.contributionWeight),inputValidator:(text)=>Number(text)>0&&Number(text)<=1||'请输入 0-1 之间的数值',
+  }).then(result=>Number(result.value)).catch(()=>null)
+  if (value===null) return
+  await api({method:'PATCH',url:`/projects/${project.publicId}/goal-links/${link.goalId}`,
+    data:{goalId:link.goalId,contributionWeight:value}})
+  await load()
+}
+
+async function unlinkGoal(project:any, link:GoalLink) {
+  await ElMessageBox.confirm(`解除项目与“${link.goalName}”的关联？`,'解除关联',{type:'warning'})
+  await api({method:'DELETE',url:`/projects/${project.publicId}/goal-links/${link.goalId}`})
+  await load()
+}
+
+async function addMilestone(project:any) {
+  const name=await ElMessageBox.prompt('里程碑名称','新增里程碑',{inputValidator:(text)=>Boolean(text?.trim())||'名称不能为空'})
+    .then(result=>result.value.trim()).catch(()=>null)
+  if (!name) return
+  const current=(projectMilestones.value[project.publicId] || []).filter((item)=>item.status!=='CANCELED')
+  const sequenceNo=current.length+1
+  const weight=Math.max(0.0001,Number((1/(sequenceNo)).toFixed(4)))
+  await api({method:'POST',url:`/projects/${project.publicId}/milestones`,data:{
+    name,sequenceNo,dueDate:project.dueDate,weight,
+    acceptanceCriteria:[{description:`${name}验收通过`,completed:false}],
+  }})
+  ElMessage.info('里程碑已新增；激活前请调整各里程碑权重，使总和为 100%')
+  await load()
+}
+
+async function editMilestone(project:any,milestone:any) {
+  const name=await ElMessageBox.prompt('里程碑名称','编辑里程碑',{inputValue:milestone.name,
+    inputValidator:(text)=>Boolean(text?.trim())||'名称不能为空'}).then(result=>result.value.trim()).catch(()=>null)
+  if (!name) return
+  const weight=await ElMessageBox.prompt('输入里程碑权重（0-1）；同一项目激活前权重合计必须为 1','编辑里程碑权重',{
+    inputValue:String(milestone.weight),inputValidator:(text)=>Number(text)>0&&Number(text)<=1||'请输入 0-1 之间的数值',
+  }).then(result=>Number(result.value)).catch(()=>null)
+  if (weight===null) return
+  const acceptanceText=await ElMessageBox.prompt('每行一个数据库权威验收条件','编辑验收条件',{
+    inputType:'textarea',inputValue:milestoneCriteria(milestone).map((item:any)=>item.description || item.name).filter(Boolean).join('\n'),
+    inputValidator:(text)=>Boolean(text?.trim())||'至少填写一项验收条件',
+  }).then(result=>result.value).catch(()=>null)
+  if (!acceptanceText) return
+  await api({method:'PATCH',url:`/milestones/${milestone.publicId}`,data:{
+    name,sequenceNo:milestone.sequenceNo,dueDate:milestone.dueDate,weight,
+    acceptanceCriteria:acceptanceText.split(/\r?\n/).map((description)=>description.trim()).filter(Boolean)
+      .map((description)=>({description,completed:false})),version:milestone.version,
+  }})
+  await load()
+}
+
+function availableGoalsForLink(project:any) {
+  const linked=new Set((projectGoalLinks.value[project.publicId] || []).map((link)=>link.goalId))
+  return goals.value.filter((goal)=>!linked.has(goal.publicId)&&!['COMPLETED','CANCELED'].includes(goal.status))
+}
+
+function projectProgress(project:any) {
+  for (const progress of Object.values(goalProgress.value)) {
+    const component=(progress?.projectComponents || []).find((item:any)=>item.projectId===project.publicId)
+    if (component) return Math.round(Number(component.progress || 0)*100)
+  }
+  return 0
 }
 
 function statusText(status: string) {
-  return ({ DRAFT: '尚未启程', ACTIVE: '正在推进', PAUSED: '暂时停靠', COMPLETED: '已经抵达', CANCELED: '已结束' } as Record<string, string>)[status] || status
+  return ({ DRAFT: '尚未启程', ACTIVE: '正在推进', PAUSED: '暂时停靠', NOT_STARTED: '尚未开始',
+    COMPLETED: '已经抵达', CANCELED: '已结束', ARCHIVED: '已归档' } as Record<string, string>)[status] || status
 }
 function goalCriteria(goal:any):any[] {
   try { return JSON.parse(goal.successCriteriaJson || '[]') } catch { return [] }
@@ -401,6 +551,8 @@ function goalSourceText(goal: any) {
         <small v-if="recommendationOutdated">当前画像已经更新；这些候选仍会保留，点击“重新让 AI 推荐”才会生成新结果。</small>
         <small v-else>刷新或重新进入页面仍会显示；只有点击“重新让 AI 推荐”才会调用模型。</small>
       </div>
+      <el-alert v-if="recommendationMeta?.message" class="recommendation-alert" type="info" :closable="false"
+        :title="recommendationMeta.message" />
 
       <div v-if="recommending" class="recommendation-loading">
         <span v-for="item in 3" :key="item"><i /><i /><i /></span>
@@ -420,7 +572,9 @@ function goalSourceText(goal: any) {
           <div class="recommendation-milestones">
             <span v-for="milestone in item.milestones" :key="milestone">{{ milestone }}</span>
           </div>
-          <button class="adopt-goal" @click="useRecommendation(item)">查看并采用这个目标 <b>→</b></button>
+          <button class="adopt-goal" :disabled="recommendationOutdated || profile?.status !== 'GENERATED'" @click="useRecommendation(item)">
+            {{ recommendationOutdated ? '画像已更新，请重新推荐' : '查看并采用这个目标' }} <b>→</b>
+          </button>
         </article>
       </div>
       <div v-else class="recommendation-empty">
@@ -435,6 +589,7 @@ function goalSourceText(goal: any) {
         <div class="card-copy"><h2>{{ goal.name }}</h2><p>{{ goal.description || '还没有写下说明。也许可以补充：为什么这件事对你重要？' }}</p></div>
         <div class="goal-horizon"><i /><span>{{ goal.startDate }}</span><b>→</b><span>{{ goal.dueDate }}</span></div>
         <div class="card-facts"><span><small>每周投入</small><b>{{ goal.weeklyBudgetMinutes }} 分钟</b></span><span><small>优先级</small><b>{{ goal.priority || 'MEDIUM' }}</b></span></div>
+        <div class="goal-progress"><span>总体进度</span><el-progress :percentage="Number(goalProgress[goal.publicId]?.value || 0)" /></div>
         <div v-if="goalCriteria(goal).length" class="goal-criteria">
           <span>成功标准</span>
           <el-checkbox v-for="(criterion, criterionIndex) in goalCriteria(goal)" :key="`${goal.publicId}-${criterionIndex}`"
@@ -449,7 +604,8 @@ function goalSourceText(goal: any) {
             <div class="project-milestones">
               <div v-for="milestone in projectMilestones[project.publicId] || []" :key="milestone.publicId" :class="`milestone-${milestone.status?.toLowerCase()}`">
                 <span><b>{{ milestone.sequenceNo }}. {{ milestone.name }}</b><small>{{ milestone.dueDate }} · {{ Math.round(Number(milestone.weight)*100) }}%</small></span>
-                <button v-if="project.status === 'ACTIVE' && milestone.status !== 'COMPLETED'" @click="completeMilestone(project,milestone)">完成</button>
+                <button v-if="project.status === 'ACTIVE' && !['COMPLETED','CANCELED'].includes(milestone.status)" @click="completeMilestone(project,milestone)">完成</button>
+                <button v-if="project.status === 'DRAFT' && milestone.status !== 'CANCELED'" @click="editMilestone(project,milestone)">编辑</button>
                 <button v-if="project.status === 'DRAFT' && milestone.status !== 'CANCELED'" @click="cancelMilestone(milestone)">取消</button>
               </div>
             </div>
@@ -480,6 +636,54 @@ function goalSourceText(goal: any) {
           </article>
         </div>
       </div>
+    </section>
+
+    <section class="project-board">
+      <div class="project-board-heading">
+        <div><span class="eyebrow">PROJECT LIFECYCLE</span><h2>项目与里程碑</h2><p>项目结构只在草稿期调整；激活后通过里程碑验收推进。</p></div>
+        <el-button type="primary" @click="resetProjectForm()">新建项目</el-button>
+      </div>
+      <el-empty v-if="!projects.length" description="暂无项目" />
+      <article v-for="project in projects" :key="project.publicId" class="project-panel">
+        <div class="project-panel-head">
+          <div><el-tag size="small">{{ statusText(project.status) }}</el-tag><h3>{{ project.name }}</h3><p>{{ project.description || '暂无项目说明' }}</p></div>
+          <div class="project-state-actions">
+            <el-button v-if="project.status === 'DRAFT'" @click="resetProjectForm(project)">编辑</el-button>
+            <el-button v-if="project.status === 'DRAFT'" type="primary" @click="projectAction(project,'activation')">激活</el-button>
+            <el-button v-if="project.status === 'ACTIVE'" @click="projectAction(project,'pause')">暂停</el-button>
+            <el-button v-if="project.status === 'PAUSED'" type="primary" @click="projectAction(project,'resume')">恢复</el-button>
+            <el-button v-if="project.status === 'ACTIVE'" type="success" @click="projectAction(project,'completion')">完成</el-button>
+            <el-button v-if="['DRAFT','ACTIVE','PAUSED'].includes(project.status)" type="danger" plain @click="projectAction(project,'cancellation')">取消</el-button>
+            <el-button v-if="['COMPLETED','CANCELED'].includes(project.status)" @click="projectAction(project,'archive')">归档</el-button>
+          </div>
+        </div>
+        <div class="project-meta"><span>{{ project.startDate }} → {{ project.dueDate }}</span><span>优先级 {{ project.priority }}</span><a v-if="project.repositoryUrl" :href="project.repositoryUrl" target="_blank" rel="noopener">成果仓库 ↗</a></div>
+        <el-progress :percentage="projectProgress(project)" />
+        <div class="project-section">
+          <div class="project-section-title"><b>关联目标与贡献权重</b><small>同一目标下项目权重合计不超过 100%</small></div>
+          <div v-for="link in projectGoalLinks[project.publicId] || []" :key="link.goalId" class="project-link-row">
+            <span>{{ link.goalName }} · {{ Math.round(Number(link.contributionWeight)*100) }}%</span>
+            <span v-if="project.status === 'DRAFT'"><el-button link @click="updateGoalLink(project,link)">调整权重</el-button><el-button link type="danger" @click="unlinkGoal(project,link)">解除</el-button></span>
+          </div>
+          <div v-if="project.status === 'DRAFT' && availableGoalsForLink(project).length" class="project-add-row">
+            <el-select v-model="linkGoalSelection[project.publicId]" placeholder="选择目标">
+              <el-option v-for="goal in availableGoalsForLink(project)" :key="goal.publicId" :value="goal.publicId" :label="goal.name" />
+            </el-select>
+            <el-input-number v-model="linkWeight[project.publicId]" :min="0.0001" :max="1" :step="0.1" />
+            <el-button @click="addGoalLink(project)">关联</el-button>
+          </div>
+        </div>
+        <div class="project-section">
+          <div class="project-section-title"><b>里程碑</b><el-button v-if="project.status === 'DRAFT'" link @click="addMilestone(project)">新增</el-button></div>
+          <div v-for="milestone in projectMilestones[project.publicId] || []" :key="milestone.publicId" class="project-link-row">
+            <span>{{ milestone.sequenceNo }}. {{ milestone.name }} · {{ Math.round(Number(milestone.weight)*100) }}% · {{ statusText(milestone.status) }}</span>
+            <span>
+              <el-button v-if="project.status === 'DRAFT' && milestone.status !== 'CANCELED'" link @click="editMilestone(project,milestone)">编辑</el-button>
+              <el-button v-if="project.status === 'ACTIVE' && milestone.status !== 'COMPLETED' && milestone.status !== 'CANCELED'" link type="success" @click="completeMilestone(project,milestone)">验收</el-button>
+            </span>
+          </div>
+        </div>
+      </article>
     </section>
 
     <el-dialog v-model="dialog" :title="form.sourceType === 'CUSTOM' ? '定义一个新目标' : '确认画像推荐目标'" width="620">
@@ -515,6 +719,24 @@ function goalSourceText(goal: any) {
         </el-form-item>
       </el-form>
       <template #footer><el-button @click="dialog = false">取消</el-button><el-button type="primary" :loading="loading" @click="save">创建</el-button></template>
+    </el-dialog>
+
+    <el-dialog v-model="projectDialog" :title="editingProjectId ? '编辑草稿项目' : '新建项目'" width="620">
+      <el-form label-position="top">
+        <el-form-item label="项目名称"><el-input v-model="projectForm.name" maxlength="120" /></el-form-item>
+        <el-form-item label="项目说明"><el-input v-model="projectForm.description" type="textarea" :rows="3" /></el-form-item>
+        <el-form-item label="公共目录主方向（可选）"><el-select v-model="projectForm.primaryDirectionId" clearable class="full"><el-option v-for="direction in catalog" :key="direction.id" :value="String(direction.id)" :label="direction.name" /></el-select></el-form-item>
+        <div class="grid grid-2">
+          <el-form-item label="开始日期"><el-date-picker v-model="projectForm.startDate" value-format="YYYY-MM-DD" class="full" /></el-form-item>
+          <el-form-item label="截止日期"><el-date-picker v-model="projectForm.dueDate" value-format="YYYY-MM-DD" class="full" /></el-form-item>
+          <el-form-item label="优先级"><el-select v-model="projectForm.priority" class="full"><el-option value="LOW"/><el-option value="MEDIUM"/><el-option value="HIGH"/><el-option value="URGENT"/></el-select></el-form-item>
+          <el-form-item v-if="!editingProjectId" label="初始关联目标"><el-select v-model="projectForm.goalId" class="full"><el-option v-for="goal in goals.filter((item)=>!['COMPLETED','CANCELED'].includes(item.status))" :key="goal.publicId" :value="goal.publicId" :label="goal.name" /></el-select></el-form-item>
+        </div>
+        <el-form-item label="成果仓库"><el-input v-model="projectForm.repositoryUrl" /></el-form-item>
+        <el-form-item label="交付物（每行一个）"><el-input v-model="projectForm.deliverablesText" type="textarea" :rows="3" /></el-form-item>
+        <el-form-item v-if="!editingProjectId" label="初始里程碑（每行一个）"><el-input v-model="projectForm.milestonesText" type="textarea" :rows="4" /></el-form-item>
+      </el-form>
+      <template #footer><el-button @click="projectDialog=false">取消</el-button><el-button type="primary" :loading="projectSaving" @click="saveProject">保存</el-button></template>
     </el-dialog>
   </div>
 </template>
@@ -563,6 +785,7 @@ function goalSourceText(goal: any) {
 .recommendation-milestones { display: flex; flex-wrap: wrap; gap: 5px; }
 .recommendation-milestones span, .criteria-preview span { padding: 5px 8px; border-radius: 8px; color: #557163; background: var(--chip); font-size: 8px; }
 .adopt-goal { display: flex; align-items: center; justify-content: space-between; margin-top: 16px; padding: 11px 13px; border: 0; border-radius: 11px; color: #fff; background: #1b513d; font-size: 9px; font-weight: 800; }
+.adopt-goal:disabled{cursor:not-allowed;opacity:.55}
 .adopt-goal b { font-size: 14px; }
 .recommendation-empty { display: flex; align-items: center; flex-direction: column; margin-top: 23px; padding: 27px; border: 1px dashed rgba(40, 91, 67, .17); border-radius: 17px; color: #365e4b; text-align: center; }
 .recommendation-empty small { margin-top: 5px; color: var(--muted); font-size: 8px; }
@@ -610,6 +833,8 @@ function goalSourceText(goal: any) {
 .goal-criteria{display:grid;gap:6px;margin:0 0 16px;padding:12px;border-radius:12px;background:var(--chip)}.goal-criteria>span{font-size:8px;font-weight:800;letter-spacing:.12em;color:var(--muted)}.goal-criteria :deep(.el-checkbox){height:auto;margin-right:0}.goal-criteria :deep(.el-checkbox__label){white-space:normal;font-size:10px;color:var(--ink)}
 .project-milestones{display:grid;gap:6px;margin:-10px 0 18px}.project-milestones>div{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:9px 11px;border-radius:11px;background:var(--chip)}.project-milestones span,.project-milestones b,.project-milestones small{display:block}.project-milestones b{font-size:9px}.project-milestones small{margin-top:3px;color:var(--muted);font-size:8px}.project-milestones button{border:0;color:var(--green);background:transparent;font-size:9px;font-weight:700}.project-milestones .milestone-completed{opacity:.65}.project-milestones .milestone-completed b{text-decoration:line-through}
 .project-inline-actions{display:flex;flex-wrap:wrap;gap:7px;margin:-12px 0 18px;justify-content:flex-end}.project-inline-actions button{padding:7px 10px;border:1px solid rgba(30,86,62,.12);border-radius:9px;color:var(--green);background:var(--chip);font-size:8px;font-weight:700}.project-inline-actions .quiet-action{margin-left:auto;border-color:transparent;background:transparent}.project-inline-empty{margin:-10px 0 18px;padding:10px 12px;border:1px dashed rgba(31,88,64,.16);border-radius:11px;color:var(--muted);font-size:9px;text-align:center}
+.goal-progress{display:grid;grid-template-columns:auto 1fr;align-items:center;gap:12px;margin:12px 0;color:var(--muted);font-size:9px}.goal-progress :deep(.el-progress){width:100%}
+.project-board{display:grid;gap:16px;padding:28px;border:1px solid var(--line);border-radius:28px;background:var(--paper-soft)}.project-board-heading,.project-panel-head,.project-section-title,.project-link-row,.project-add-row{display:flex;align-items:center;justify-content:space-between;gap:14px}.project-board-heading h2{margin:6px 0 4px;font:500 25px var(--display)}.project-board-heading p,.project-panel-head p{margin:0;color:var(--muted);font-size:9px}.project-panel{display:grid;gap:14px;padding:20px;border:1px solid var(--line);border-radius:18px;background:var(--card)}.project-panel-head{align-items:flex-start}.project-panel-head h3{margin:8px 0 5px;font:500 20px var(--display)}.project-state-actions{display:flex;flex-wrap:wrap;justify-content:flex-end;gap:5px}.project-meta{display:flex;flex-wrap:wrap;gap:18px;color:var(--muted);font-size:9px}.project-meta a{color:var(--green)}.project-section{display:grid;gap:7px;padding:13px;border-radius:13px;background:var(--chip)}.project-section-title small{color:var(--muted);font-size:8px}.project-link-row{padding:8px 3px;border-bottom:1px solid var(--line);font-size:9px}.project-link-row:last-child{border-bottom:0}.project-add-row{justify-content:flex-start}.project-add-row :deep(.el-select){min-width:220px}
 .featured .project-mark { color: #a7beb2; background: rgba(255, 255, 255, .055); }
 .project-mark i { color: var(--gold); font-style: normal; }
 .empty-collection { display: flex; align-items: center; justify-content: center; flex-direction: column; min-height: 300px; border: 1px dashed rgba(31, 88, 64, .18); border-radius: 27px; color: var(--green); background: rgba(249, 251, 247, .45); }
@@ -633,6 +858,7 @@ function goalSourceText(goal: any) {
   .goal-totals { justify-self: start; }
   .goal-gallery { grid-template-columns: 1fr; }
   .recommendation-list, .recommendation-loading { grid-template-columns: 1fr; }
+  .project-panel-head,.project-board-heading{align-items:flex-start;flex-direction:column}.project-state-actions{justify-content:flex-start}
 }
 @media (max-width: 560px) {
   .goal-hero { padding: 24px 20px; border-radius: 25px; }

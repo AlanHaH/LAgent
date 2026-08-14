@@ -12,6 +12,10 @@ import org.springframework.boot.test.mock.mockito.MockBean;
 import org.springframework.http.MediaType;
 import org.springframework.test.context.ActiveProfiles;
 import org.springframework.test.web.servlet.MockMvc;
+import org.springframework.jdbc.core.JdbcTemplate;
+
+import java.sql.Timestamp;
+import java.time.Instant;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
@@ -25,7 +29,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 @AutoConfigureMockMvc
 @ActiveProfiles("test")
 class AuthIntegrationTest {
- @Autowired MockMvc mvc;@Autowired ObjectMapper json;
+ @Autowired MockMvc mvc;@Autowired ObjectMapper json;@Autowired JdbcTemplate jdbc;
  @MockBean VerificationMailService mailService;
  @Test void allowsLocalhostAndLoopbackFrontendOrigins()throws Exception{
   for(String origin:new String[]{"http://localhost:5300","http://127.0.0.1:5300"}){
@@ -86,7 +90,49 @@ class AuthIntegrationTest {
           .content("{\"login\":\""+email+"\",\"password\":\"StrongPass123!\"}"))
           .andExpect(status().isUnauthorized());
   mvc.perform(post("/api/v1/auth/login").contentType(MediaType.APPLICATION_JSON)
-          .content("{\"login\":\""+email+"\",\"password\":\"NewStrongPass456!\"}"))
+           .content("{\"login\":\""+email+"\",\"password\":\"NewStrongPass456!\"}"))
+           .andExpect(status().isOk());
+ }
+
+ @Test void persistsFailedLoginsAndLocksAfterFiveAttempts()throws Exception{
+  String email="lock-user@example.com";
+  mvc.perform(post("/api/v1/auth/email-verification-codes").contentType(MediaType.APPLICATION_JSON)
+          .content("{\"email\":\""+email+"\",\"purpose\":\"REGISTER\"}"))
           .andExpect(status().isOk());
+  var code=org.mockito.ArgumentCaptor.forClass(String.class);
+  verify(mailService).sendVerificationCode(eq(email),eq(EmailVerificationPurpose.REGISTER),code.capture(),any());
+  String body="{\"username\":\"lock_user\",\"email\":\""+email+"\",\"password\":\"StrongPass123!\",\"verificationCode\":\""+code.getValue()+"\",\"deviceId\":\"test\"}";
+  mvc.perform(post("/api/v1/auth/register").contentType(MediaType.APPLICATION_JSON).content(body))
+          .andExpect(status().isCreated());
+
+  for(int attempt=1;attempt<=4;attempt++){
+   mvc.perform(post("/api/v1/auth/login").contentType(MediaType.APPLICATION_JSON)
+           .content("{\"login\":\"lock_user\",\"password\":\"wrong-password\"}"))
+           .andExpect(status().isUnauthorized())
+           .andExpect(jsonPath("$.error.code").value("AUTH_INVALID_CREDENTIALS"));
+   Integer failures=jdbc.queryForObject("SELECT login_failed_count FROM sys_user WHERE username='lock_user'",Integer.class);
+   assertThat(failures).isEqualTo(attempt);
+  }
+  mvc.perform(post("/api/v1/auth/login").contentType(MediaType.APPLICATION_JSON)
+          .content("{\"login\":\"lock_user\",\"password\":\"wrong-password\"}"))
+          .andExpect(status().isUnauthorized());
+  Timestamp lockedUntil=jdbc.queryForObject("SELECT locked_until FROM sys_user WHERE username='lock_user'",Timestamp.class);
+  assertThat(lockedUntil).isNotNull();
+  assertThat(lockedUntil.toInstant()).isAfter(Instant.now());
+
+  mvc.perform(post("/api/v1/auth/login").contentType(MediaType.APPLICATION_JSON)
+          .content("{\"login\":\"lock_user\",\"password\":\"StrongPass123!\"}"))
+          .andExpect(status().isLocked())
+          .andExpect(jsonPath("$.error.code").value("AUTH_ACCOUNT_LOCKED"));
+
+  jdbc.update("UPDATE sys_user SET locked_until=?,login_failed_count=3 WHERE username='lock_user'",
+          Timestamp.from(Instant.now().minusSeconds(1)));
+  mvc.perform(post("/api/v1/auth/login").contentType(MediaType.APPLICATION_JSON)
+          .content("{\"login\":\"lock_user\",\"password\":\"StrongPass123!\"}"))
+          .andExpect(status().isOk());
+  Integer failures=jdbc.queryForObject("SELECT login_failed_count FROM sys_user WHERE username='lock_user'",Integer.class);
+  Timestamp clearedLock=jdbc.queryForObject("SELECT locked_until FROM sys_user WHERE username='lock_user'",Timestamp.class);
+  assertThat(failures).isZero();
+  assertThat(clearedLock).isNull();
  }
 }

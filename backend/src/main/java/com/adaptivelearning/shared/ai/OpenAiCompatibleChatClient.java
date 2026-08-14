@@ -95,7 +95,7 @@ public class OpenAiCompatibleChatClient implements AiModelClient {
             JsonNode contentNode = response == null ? null : response.at("/choices/0/message/content");
             String content = contentNode == null || contentNode.isMissingNode() ? "" : contentNode.asText().trim();
             if (content.isBlank() || content.length() > 10_000) {
-                throw new AiModelException(ErrorCode.MODEL_PROVIDER_ERROR);
+                throw new AiModelException(ErrorCode.MODEL_OUTPUT_INVALID);
             }
             return new Completion(content, integerAt(response, "/usage/prompt_tokens"),
                     integerAt(response, "/usage/completion_tokens"), latency);
@@ -108,7 +108,7 @@ public class OpenAiCompatibleChatClient implements AiModelClient {
             ErrorCode code = e.getStatusCode().value() == 429
                     ? ErrorCode.MODEL_QUOTA_EXCEEDED : ErrorCode.MODEL_PROVIDER_ERROR;
             log.warn("AI model provider returned HTTP {}", e.getStatusCode().value());
-            throw new AiModelException(code, e);
+            throw new AiModelException(code, null, Map.of("providerStatus", e.getStatusCode().value()), e);
         } catch (RuntimeException e) {
             log.warn("AI model response could not be processed: {}", e.getClass().getSimpleName());
             throw new AiModelException(ErrorCode.MODEL_PROVIDER_ERROR, e);
@@ -132,7 +132,8 @@ public class OpenAiCompatibleChatClient implements AiModelClient {
                         if (!response.getStatusCode().is2xxSuccessful()) {
                             ErrorCode code = response.getStatusCode().value() == 429
                                     ? ErrorCode.MODEL_QUOTA_EXCEEDED : ErrorCode.MODEL_PROVIDER_ERROR;
-                            throw new AiModelException(code);
+                            throw new AiModelException(code, null,
+                                    Map.of("providerStatus", response.getStatusCode().value()), null);
                         }
                         StringBuilder result = new StringBuilder();
                         try (BufferedReader reader = new BufferedReader(new InputStreamReader(
@@ -157,7 +158,7 @@ public class OpenAiCompatibleChatClient implements AiModelClient {
                     });
             long latency = (System.nanoTime() - begin) / 1_000_000;
             if (content == null || content.isBlank()) {
-                throw new AiModelException(ErrorCode.MODEL_PROVIDER_ERROR);
+                throw new AiModelException(ErrorCode.MODEL_OUTPUT_INVALID);
             }
             return new Completion(content.trim(), null, null, latency);
         } catch (AiStreamCancelledException | AiModelException e) {
@@ -169,7 +170,7 @@ public class OpenAiCompatibleChatClient implements AiModelClient {
             ErrorCode code = e.getStatusCode().value() == 429
                     ? ErrorCode.MODEL_QUOTA_EXCEEDED : ErrorCode.MODEL_PROVIDER_ERROR;
             log.warn("AI model stream provider returned HTTP {}", e.getStatusCode().value());
-            throw new AiModelException(code, e);
+            throw new AiModelException(code, null, Map.of("providerStatus", e.getStatusCode().value()), e);
         } catch (RuntimeException e) {
             log.warn("AI model stream could not be processed: {}", e.getClass().getSimpleName());
             throw new AiModelException(ErrorCode.MODEL_PROVIDER_ERROR, e);

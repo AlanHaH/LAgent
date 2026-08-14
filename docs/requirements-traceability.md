@@ -7,7 +7,7 @@
 | 前端产品导览（体验增强） | 无，纯前端 | `/` 宣传首页 | 匿名访问、五项能力切换、路径预览不落库、登录/注册分流、响应式与减弱动画适配 | VERIFIED |
 | FR-SUP-001~010 | `support`, `shared.security` | 登录、注册、找回密码、账户设置、系统管理 | 邮箱验证、密码重置、JWT 轮换、失败锁定、RBAC、审计、无客户端 userId | VERIFIED |
 | FR-PRO-001~008 | `profile` | 学习画像 | SSE 对话草稿、用户确认落库、时间重叠/跨午夜、容量偏好、版本、自评证据 | VERIFIED |
-| FR-GPM-001~007 | `goalproject` | 目标与项目 | 自定义/画像推荐双入口、推荐确认、画像版本来源快照、目录与用户自定义方向双轨、生命周期、里程碑、关联、进度、依赖 DAG | VERIFIED |
+| FR-GPM-001~007 | `goalproject` | 目标与项目 | 自定义/画像推荐双入口、单一画像版本快照输入、服务端推荐来源反查、目录与用户自定义方向双轨、确定性规则候选、项目生命周期、数据库权威里程碑验收、关联权重和进度 | VERIFIED |
 | FR-AGT-001~009 | `planning` | Agent 计划 | AI 内容候选、知识空间显式选择、活动文档快照、Chunk 来源二次鉴权与任务引用、基于周时段/例外日/容量偏好的确定性排期、部分采纳、提案隔离、版本、校验、确认、幂等事务发布、可靠 Outbox、反馈触发优化 | VERIFIED |
 | FR-RAG-001~009 | `knowledgebase` | 知识库、知识问答 | 层级资料分类、MIME/结构/压缩炸弹/可选病毒扫描、150MB 异步处理、空间/文档补偿删除、租户过滤、混合检索、引用、拒答、工具调用审计 | VERIFIED |
 | PAI-GOAL-001~009 | `ai-service`, `shared.ai`, `knowledgebase`, `profile`, `goalproject` | 学习画像、目标推荐、知识问答 | Python模型网关/画像/目标候选/计划任务候选/Embedding/Qdrant/RAG，推荐批次持久化与只读恢复、显式重新推荐，Java二次校验、目录/自定义方向双轨，画像和问答真实 SSE | VERIFIED |
@@ -23,7 +23,7 @@
 - 目标/项目状态机：`StateMachineTest`
 - 依赖环：`DependencyGraphPolicyTest`
 - 任务状态合法性：`TaskStatusPolicyTest`
-- 计划容量、时长、取消任务不占容量和发布前校验：`PlanValidationPolicyTest`
+- 计划候选、时段/周容量、软偏好、取消任务不占容量、发布前权威校验与并发发布：`PlanCandidatePolicyTest`、`PlanningCapacityPolicyTest`、`RuleBasedPlannerM05BTest`、`PlanningPublicationConcurrencyIntegrationTest`
 - 学习计时跨日切分：`StudySessionAllocationTest`
 - 总览双进度：后端测试集与 2026-07-28 本地 MySQL/API 验收；半程账号返回总体进度 `294/588=50%`、近 7 天完成率 `1/1=100%`
 - 掌握度缺失分量与自评置信度：`MasteryPolicyTest`

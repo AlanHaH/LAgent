@@ -26,7 +26,8 @@ public class ExecutionController {
     }
 
     public record ActionRequest(@Size(max = 1000) String reason, boolean confirmed, boolean startTimer,
-                                TaskService.CompletionInput summary) {
+                                TaskService.CompletionInput summary,
+                                TaskAcceptancePolicy.Confirmation acceptance) {
     }
 
     public record StartSessionRequest(@NotBlank String taskId) {
@@ -103,7 +104,14 @@ public class ExecutionController {
             case "completion" -> "COMPLETED";
             default -> "CANCELED";
         };
-        return ApiResponse.ok(tasks.transition(id, target, r == null ? null : r.reason(), r == null ? null : r.summary(), r != null && r.confirmed()));
+        return ApiResponse.ok(tasks.transition(id, target, r == null ? null : r.reason(),
+                r == null ? null : r.summary(), r != null && r.confirmed(),
+                r == null ? null : r.acceptance()));
+    }
+
+    @GetMapping("/study-sessions/active")
+    public ApiResponse<List<StudySessionService.ActiveSessionView>> activeSessions() {
+        return ApiResponse.ok(sessions.active());
     }
 
     @PostMapping("/study-sessions")

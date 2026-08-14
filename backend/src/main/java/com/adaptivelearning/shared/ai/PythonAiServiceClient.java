@@ -17,6 +17,7 @@ import org.springframework.web.client.RestClientResponseException;
 
 import java.io.BufferedReader;
 import java.io.InputStreamReader;
+import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.time.Duration;
@@ -209,7 +210,7 @@ public class PythonAiServiceClient {
                     item.path("weeklyBudgetMinutes").asInt(), List.copyOf(criteria),
                     item.path("reason").asText(), List.copyOf(milestones)));
         }
-        if (recommendations.isEmpty()) throw new AiModelException(ErrorCode.MODEL_PROVIDER_ERROR);
+        if (recommendations.isEmpty()) throw new AiModelException(ErrorCode.MODEL_OUTPUT_INVALID);
         return new GoalRecommendationResult(List.copyOf(recommendations),
                 data.path("promptVersion").asText("goal-recommendation-v2"));
     }
@@ -226,7 +227,12 @@ public class PythonAiServiceClient {
             item.path("sourceChunkIds").forEach(value -> sourceChunkIds.add(value.asLong()));
             List<String> sourceQueries = new java.util.ArrayList<>();
             item.path("sourceQueries").forEach(value -> sourceQueries.add(value.asText()));
+            List<String> coveredGoalCriterionIds = new java.util.ArrayList<>();
+            item.path("coveredGoalCriterionIds").forEach(value -> coveredGoalCriterionIds.add(value.asText()));
+            List<String> coveredMilestoneCriterionIds = new java.util.ArrayList<>();
+            item.path("coveredMilestoneCriterionIds").forEach(value -> coveredMilestoneCriterionIds.add(value.asText()));
             tasks.add(new PlanTaskItem(
+                    item.path("clientRef").asText("task-" + java.util.UUID.randomUUID()),
                     item.path("title").asText(),
                     item.path("taskType").asText(),
                     item.path("priority").asText("MEDIUM"),
@@ -236,6 +242,9 @@ public class PythonAiServiceClient {
                     item.path("learningObjective").asText(item.path("title").asText()),
                     List.copyOf(sourceQueries),
                     List.copyOf(criteria),
+                    item.path("milestoneId").isIntegralNumber() ? item.path("milestoneId").asLong() : null,
+                    List.copyOf(coveredGoalCriterionIds),
+                    List.copyOf(coveredMilestoneCriterionIds),
                     item.path("reason").asText()));
         }
         if (tasks.isEmpty()) throw new AiModelException(ErrorCode.MODEL_PROVIDER_ERROR);
@@ -394,10 +403,11 @@ public class PythonAiServiceClient {
                     .body(body)
                     .exchange((request, response) -> {
                         if (!response.getStatusCode().is2xxSuccessful()) {
-                            return new StreamResult(null, mapStatus(response.getStatusCode().value()));
+                            String bodyText = new String(response.getBody().readAllBytes(), StandardCharsets.UTF_8);
+                            return new StreamResult(null, streamFailure(response.getStatusCode().value(), bodyText));
                         }
                         JsonNode completed = null;
-                        ErrorCode failedCode = null;
+                        AiModelException failed = null;
                         String event = null;
                         StringBuilder data = new StringBuilder();
                         try (BufferedReader reader = new BufferedReader(new InputStreamReader(
@@ -409,7 +419,7 @@ public class PythonAiServiceClient {
                                 else if (line.isBlank() && event != null) {
                                     JsonNode payload = data.isEmpty() ? json.createObjectNode() : json.readTree(data.toString());
                                     if ("message.failed".equals(event)) {
-                                        failedCode = mapPythonCode(payload.path("code").asText());
+                                        failed = pythonFailure(payload, null);
                                     } else {
                                         events.accept(event, payload);
                                         if ("message.completed".equals(event)) completed = payload;
@@ -419,10 +429,10 @@ public class PythonAiServiceClient {
                                 }
                             }
                         }
-                        return new StreamResult(completed, failedCode);
+                        return new StreamResult(completed, failed);
                     });
             if (result == null) throw new AiModelException(ErrorCode.MODEL_PROVIDER_ERROR);
-            if (result.errorCode() != null) throw new AiModelException(result.errorCode());
+            if (result.error() != null) throw result.error();
             if (result.completed() == null) throw new AiModelException(ErrorCode.MODEL_PROVIDER_ERROR);
             return result.completed();
         } catch (RuntimeException error) {
@@ -459,12 +469,9 @@ public class PythonAiServiceClient {
                 JsonNode payload = json.readTree(response.getResponseBodyAsString());
                 JsonNode providerError = payload.path("error");
                 if (providerError.isObject()) {
-                    code = mapPythonCode(providerError.path("code").asText());
-                    String message = safeMessage(providerError.path("message").asText());
-                    Map<String, Object> details = safeProviderDetails(providerError.path("details"));
                     log.warn("{}: status={} code={}", logMessage,
                             response.getStatusCode().value(), providerError.path("code").asText());
-                    return new AiModelException(code, message, details, error);
+                    return pythonFailure(providerError, error);
                 }
             } catch (Exception parseError) {
                 log.debug("Could not parse Python AI error response", parseError);
@@ -521,6 +528,25 @@ public class PythonAiServiceClient {
         return safe;
     }
 
+    private AiModelException streamFailure(int status, String body) {
+        try {
+            JsonNode payload = json.readTree(body);
+            JsonNode providerError = payload.path("error");
+            if (providerError.isObject()) return pythonFailure(providerError, null);
+        } catch (Exception ignored) {
+            // The raw body may contain provider data and is intentionally discarded.
+        }
+        return new AiModelException(mapStatus(status), null, Map.of("providerStatus", status), null);
+    }
+
+    private AiModelException pythonFailure(JsonNode payload, Throwable cause) {
+        String pythonCode = payload.path("code").asText();
+        Map<String, Object> details = new LinkedHashMap<>(safeProviderDetails(payload.path("details")));
+        if (!pythonCode.isBlank() && pythonCode.length() <= 80) details.put("pythonCode", pythonCode);
+        return new AiModelException(mapPythonCode(pythonCode), safeMessage(payload.path("message").asText()),
+                details, cause);
+    }
+
     private void copySafeDetail(JsonNode source, Map<String, Object> target, String field) {
         JsonNode value = source.path(field);
         if (value.isIntegralNumber()) {
@@ -556,7 +582,7 @@ public class PythonAiServiceClient {
         return result;
     }
 
-    private record StreamResult(JsonNode completed, ErrorCode errorCode) { }
+    private record StreamResult(JsonNode completed, AiModelException error) { }
 
     public record OcrPage(int pageNo, String text, double confidence) { }
     public record OcrResult(List<OcrPage> pages, int pageCount, int recognizedPages,
@@ -588,6 +614,9 @@ public class PythonAiServiceClient {
                                             LocalDate planEndDate, String backgroundText,
                                             List<GoalDirectionContext> directions, Object preference,
                                             int weeklyAvailableMinutes, List<String> existingGoalNames,
+                                            int selfAssessmentCount, BigDecimal confidence,
+                                            int recommendedDifficulty, int dailyRecommendedTasks,
+                                            List<String> riskNotices,
                                             int count) { }
     public record GoalRecommendationItem(Long directionId, String customDirection, String name, String type, String description,
                                          String priority, int durationDays, int weeklyBudgetMinutes,
@@ -596,21 +625,65 @@ public class PythonAiServiceClient {
     public record GoalRecommendationResult(List<GoalRecommendationItem> recommendations,
                                            String promptVersion) { }
     public record PlanKnowledgePoint(long id, String name) { }
+    public record KnowledgeDependency(long predecessorId, long successorId) { }
+    public record PlanCriterion(String criterionId, String text) { }
+    public record PlanMilestone(long id, String publicId, int sequenceNo, String name, LocalDate dueDate,
+                                String weight, List<PlanCriterion> acceptanceCriteria) { }
+    public record PlanProject(long id, String publicId, String name, String description, String priority,
+                              LocalDate startDate, LocalDate dueDate, Object deliverables,
+                              String repositoryUrl, String contributionWeight,
+                              List<PlanMilestone> milestones) { }
     public record PlanRecommendationRequest(long userId, String goalName, String directionName,
                                             String currentStage, LocalDate planStartDate,
                                             LocalDate planEndDate, String backgroundText,
+                                            String goalDescription, String goalType, String goalPriority,
+                                            Long directionId, String customDirection,
+                                            LocalDate goalStartDate, LocalDate goalDueDate,
+                                            int goalWeeklyBudgetMinutes,
+                                            List<PlanCriterion> goalSuccessCriteria,
+                                            Long goalProfileVersion, Long schedulingProfileVersion,
+                                            PlanProject project,
                                             List<PlanKnowledgePoint> knowledgePoints,
+                                            List<KnowledgeDependency> knowledgeDependencies,
+                                            List<Long> satisfiedPrerequisiteIds,
                                             List<Long> allowedSpaceIds,
                                             List<Long> allowedDocumentVersionIds,
                                             int knowledgeTopK,
                                             String userRequirement, int weeklyAvailableMinutes,
+                                            int dailyRecommendedTasks, int focusMinutes,
                                             boolean explorationMode,
-                                            int count) { }
-    public record PlanTaskItem(String title, String taskType, String priority, int estimatedMinutes,
+                                            int count) {
+        public PlanRecommendationRequest(long userId, String goalName, String directionName,
+                                         String currentStage, LocalDate planStartDate, LocalDate planEndDate,
+                                         String backgroundText, List<PlanKnowledgePoint> knowledgePoints,
+                                         List<KnowledgeDependency> knowledgeDependencies,
+                                         List<Long> satisfiedPrerequisiteIds, List<Long> allowedSpaceIds,
+                                         List<Long> allowedDocumentVersionIds, int knowledgeTopK,
+                                         String userRequirement, int weeklyAvailableMinutes,
+                                         boolean explorationMode, int count) {
+            this(userId, goalName, directionName, currentStage, planStartDate, planEndDate, backgroundText,
+                    null, null, null, null, null, planStartDate, planEndDate, weeklyAvailableMinutes,
+                    List.of(), null, null, null, knowledgePoints, knowledgeDependencies,
+                    satisfiedPrerequisiteIds, allowedSpaceIds, allowedDocumentVersionIds, knowledgeTopK,
+                    userRequirement, weeklyAvailableMinutes, 2, 45, explorationMode, count);
+        }
+    }
+    public record PlanTaskItem(String clientRef, String title, String taskType, String priority, int estimatedMinutes,
                                List<Long> knowledgePointIds, List<Long> sourceChunkIds,
                                String learningObjective, List<String> sourceQueries,
                                List<String> acceptanceCriteria,
-                               String reason) { }
+                               Long milestoneId, List<String> coveredGoalCriterionIds,
+                               List<String> coveredMilestoneCriterionIds,
+                               String reason) {
+        public PlanTaskItem(String title, String taskType, String priority, int estimatedMinutes,
+                            List<Long> knowledgePointIds, List<Long> sourceChunkIds,
+                            String learningObjective, List<String> sourceQueries,
+                            List<String> acceptanceCriteria, String reason) {
+            this("task-" + java.util.UUID.randomUUID(), title, taskType, priority, estimatedMinutes,
+                    knowledgePointIds, sourceChunkIds, learningObjective, sourceQueries, acceptanceCriteria,
+                    null, List.of(), List.of(), reason);
+        }
+    }
     public record PlanRecommendationResult(List<PlanTaskItem> tasks, String promptVersion) { }
     public record LearningBlockSource(String sourceType, String title, String url,
                                       String quotePreview) { }

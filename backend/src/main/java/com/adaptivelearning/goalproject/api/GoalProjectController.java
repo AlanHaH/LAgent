@@ -65,6 +65,10 @@ public class GoalProjectController {
                                    @NotEmpty List<Map<String, Object>> acceptanceCriteria, Integer version) {
     }
 
+    public record MilestoneCompletionRequest(@NotNull Integer version,
+                                             @NotBlank @Size(max = 2000) String summary,
+                                             @NotEmpty List<Map<String, Object>> criteria) { }
+
     @GetMapping("/goals")
     public ApiResponse<PageResponse<LearningGoalEntity>> goals(@RequestParam(defaultValue = "1") int page, @RequestParam(defaultValue = "20") int pageSize, @RequestParam(required = false) String status) {
         return ApiResponse.ok(service.goals(page, pageSize, status));
@@ -178,6 +182,23 @@ public class GoalProjectController {
         return ApiResponse.ok(null);
     }
 
+    @GetMapping("/projects/{id}/goal-links")
+    public ApiResponse<List<GoalProjectService.GoalLinkView>> links(@PathVariable String id) {
+        return ApiResponse.ok(service.goalLinks(id));
+    }
+
+    @PatchMapping("/projects/{id}/goal-links/{goalId}")
+    public ApiResponse<Void> updateLink(@PathVariable String id, @PathVariable String goalId,
+                                        @Valid @RequestBody LinkRequest r) {
+        if (!goalId.equals(r.goalId())) {
+            throw new com.adaptivelearning.shared.exception.BusinessException(
+                    com.adaptivelearning.shared.exception.ErrorCode.COMMON_VALIDATION_ERROR,
+                    "目标关联标识不一致");
+        }
+        service.updateGoalLink(id, goalId, r.contributionWeight());
+        return ApiResponse.ok(null);
+    }
+
     @DeleteMapping("/projects/{id}/goal-links/{goalId}")
     public ApiResponse<Void> unlink(@PathVariable String id, @PathVariable String goalId) {
         service.unlinkGoal(id, goalId);
@@ -201,8 +222,10 @@ public class GoalProjectController {
     }
 
     @PostMapping("/milestones/{id}/completion")
-    public ApiResponse<MilestoneEntity> milestoneComplete(@PathVariable String id, @RequestBody Map<String, Object> evidence) {
-        return ApiResponse.ok(service.completeMilestone(id, evidence));
+    public ApiResponse<MilestoneEntity> milestoneComplete(@PathVariable String id,
+                                                           @Valid @RequestBody MilestoneCompletionRequest r) {
+        return ApiResponse.ok(service.completeMilestone(id,
+                new GoalProjectService.MilestoneCompletionInput(r.version(), r.summary(), r.criteria())));
     }
 
     @PostMapping("/milestones/{id}/cancellation")

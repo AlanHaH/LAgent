@@ -12,6 +12,7 @@ from app.model.schemas import ModelClient
 from app.plans.prompts import (
     PLAN_RECOMMENDATION_PROMPT_VERSION,
     PLAN_RECOMMENDATION_SYSTEM_PROMPT,
+    PLAN_M05B_INVARIANTS,
     PLAN_USER_TEMPLATE,
 )
 from app.plans.schemas import (
@@ -66,12 +67,11 @@ class PlanRecommendationAiService:
                 if not self._model.configured:
                     raise ServiceError("AI_DEPENDENCY_UNAVAILABLE", "AI 模型服务未配置，无法生成学习计划")
                 completion = await self._model.complete(
-                    prompt.content,
+                    f"{prompt.content}\n\n{PLAN_M05B_INVARIANTS}",
                     self._user_prompt(request, evidence),
                     max_output_tokens=4000,
                 )
                 output = self._parse(completion.content)
-                allowed_ids = {item.id for item in request.knowledge_points}
                 normalized: list[PlanTaskItem] = []
                 for item in output.tasks[: request.count]:
                     criteria = list(
@@ -83,25 +83,9 @@ class PlanRecommendationAiService:
                     )
                     if not criteria:
                         raise ServiceError("AI_OUTPUT_INVALID", "学习任务缺少可验收结果")
-                    kp_ids: list[int] = []
-                    for kid in item.knowledge_point_ids:
-                        if isinstance(kid, int) and kid in allowed_ids:
-                            kp_ids.append(kid)
-                        elif isinstance(kid, str):
-                            matched = False
-                            for kp in request.knowledge_points:
-                                if kp.name == kid.strip():
-                                    kp_ids.append(kp.id)
-                                    matched = True
-                                    break
-                            if not matched:
-                                try:
-                                    int_id = int(kid)
-                                    if int_id in allowed_ids:
-                                        kp_ids.append(int_id)
-                                except (TypeError, ValueError):
-                                    pass
-                    kp_ids = list(dict.fromkeys(kp_ids))[:10]
+                    kp_ids = self._normalize_knowledge_point_ids(
+                        item.knowledge_point_ids, request
+                    )
                     source_ids = list(
                         dict.fromkeys(
                             chunk_id
@@ -117,7 +101,6 @@ class PlanRecommendationAiService:
                                 "acceptance_criteria": criteria[:5],
                                 "knowledge_point_ids": kp_ids[:10],
                                 "source_chunk_ids": source_ids,
-                                "estimated_minutes": max(15, min(item.estimated_minutes, 180)),
                                 "source_queries": list(dict.fromkeys(
                                     query.strip() for query in item.source_queries if query.strip()
                                 ))[:8],
@@ -126,6 +109,8 @@ class PlanRecommendationAiService:
                     )
                 if not normalized:
                     raise ServiceError("AI_OUTPUT_INVALID", "模型未返回学习任务")
+                self._validate_business_context(normalized, request)
+                self._validate_prerequisites(normalized, request)
                 return PlanRecommendationCompleted(
                     tasks=normalized,
                     prompt_version=prompt.version,
@@ -216,8 +201,46 @@ class PlanRecommendationAiService:
     def _user_prompt(
         self, request: PlanRecommendationRequest, evidence: list[dict[str, Any]]
     ) -> str:
-        knowledge = ", ".join(item.name for item in request.knowledge_points) or (
+        knowledge = ", ".join(f"{item.id}:{item.name}" for item in request.knowledge_points) or (
             "（无指定知识点，请按方向自行规划核心内容）"
+        )
+        goal_context = {
+            "name": request.goal_name,
+            "description": request.goal_description,
+            "type": request.goal_type,
+            "priority": request.goal_priority,
+            "directionId": request.direction_id,
+            "customDirection": request.custom_direction,
+            "startDate": request.goal_start_date,
+            "dueDate": request.goal_due_date,
+            "weeklyBudgetMinutes": request.goal_weekly_budget_minutes,
+            "successCriteria": [item.model_dump(by_alias=True) for item in request.goal_success_criteria],
+            "goalProfileVersion": request.goal_profile_version,
+            "schedulingProfileVersion": request.scheduling_profile_version,
+        }
+        project_context = request.project.model_dump(by_alias=True, mode="json") if request.project else None
+        names_by_id = {item.id: item.name for item in request.knowledge_points}
+        dependency_lines = [
+            f"{names_by_id[item.predecessor_id]} 是 {names_by_id[item.successor_id]} 的前置知识"
+            f"（{item.predecessor_id} → {item.successor_id}）"
+            for item in request.knowledge_dependencies
+        ]
+        prerequisite_context = "\n".join(
+            (
+                "<knowledgePrerequisites>",
+                "A → B 表示 A 是 B 的前置知识。",
+                "knowledgeDependencies=" + json.dumps(
+                    [item.model_dump(by_alias=True) for item in request.knowledge_dependencies],
+                    ensure_ascii=False,
+                ),
+                "satisfiedPrerequisiteIds=" + json.dumps(
+                    request.satisfied_prerequisite_ids, ensure_ascii=False
+                ),
+                *(dependency_lines or ["当前没有公共目录前置关系。"]),
+                "未满足的前置知识必须先于后续知识或在同一任务中首次出现；"
+                "已满足的前置知识可以跳过或安排 REVIEW。",
+                "</knowledgePrerequisites>",
+            )
         )
         evidence_json = (
             json.dumps(evidence, ensure_ascii=False)
@@ -243,8 +266,13 @@ class PlanRecommendationAiService:
                 plan_start_date=request.plan_start_date,
                 plan_end_date=request.plan_end_date,
                 weekly_available_minutes=request.weekly_available_minutes,
+                goal_context=json.dumps(goal_context, ensure_ascii=False, default=str),
+                project_context=json.dumps(project_context, ensure_ascii=False, default=str),
+                daily_recommended_tasks=request.daily_recommended_tasks,
+                focus_minutes=request.focus_minutes,
                 count=request.count,
                 knowledge=knowledge,
+                prerequisite_context=prerequisite_context,
                 extra_lines=extra_lines,
                 knowledge_evidence=evidence_json,
             ))
@@ -254,9 +282,14 @@ class PlanRecommendationAiService:
             f"当前阶段：{request.current_stage}",
             f"计划周期：{request.plan_start_date} 至 {request.plan_end_date}",
             f"每周可用学习时间：{request.weekly_available_minutes} 分钟",
+            f"Goal业务上下文：{json.dumps(goal_context, ensure_ascii=False, default=str)}",
+            f"Project/Milestone上下文：{json.dumps(project_context, ensure_ascii=False, default=str)}",
+            f"学习节奏建议：每天约 {request.daily_recommended_tasks} 项任务（软建议，不是上限）",
+            f"理想单次专注时长：{request.focus_minutes} 分钟（软偏好，正式范围仍为10～120分钟）",
             f"需要生成的任务数量：{request.count}",
             f"自定义方向探索模式：{request.exploration_mode}",
             f"可选知识点：{knowledge}",
+            prerequisite_context,
             f"<knowledgeEvidence>\n{evidence_json}\n</knowledgeEvidence>",
         ]
         if request.background_text:
@@ -265,6 +298,86 @@ class PlanRecommendationAiService:
             parts.append(f"用户的节奏要求：{request.user_requirement}")
         parts.append("请按学习逻辑生成任务序列，输出 JSON。")
         return "\n".join(parts)
+
+    @staticmethod
+    def _validate_business_context(
+        tasks: list[PlanTaskItem], request: PlanRecommendationRequest
+    ) -> None:
+        goal_ids = {item.criterion_id for item in request.goal_success_criteria}
+        milestones = {item.id: item for item in request.project.milestones} if request.project else {}
+        seen_refs: set[str] = set()
+        for task in tasks:
+            if task.client_ref in seen_refs:
+                raise ServiceError("AI_OUTPUT_INVALID", "模型返回了重复的 clientRef", status_code=422)
+            seen_refs.add(task.client_ref)
+            if not set(task.covered_goal_criterion_ids).issubset(goal_ids):
+                raise ServiceError("AI_OUTPUT_INVALID", "模型创造了不存在的 Goal criterionId", status_code=422)
+            if task.milestone_id is None:
+                if task.covered_milestone_criterion_ids:
+                    raise ServiceError("AI_OUTPUT_INVALID", "未归属里程碑的任务声明了里程碑覆盖", status_code=422)
+                continue
+            milestone = milestones.get(task.milestone_id)
+            if milestone is None:
+                raise ServiceError("AI_OUTPUT_INVALID", "模型创造了不存在的 milestoneId", status_code=422)
+            criterion_ids = {item.criterion_id for item in milestone.acceptance_criteria}
+            if not set(task.covered_milestone_criterion_ids).issubset(criterion_ids):
+                raise ServiceError("AI_OUTPUT_INVALID", "模型创造了不存在的 Milestone criterionId", status_code=422)
+
+    @staticmethod
+    def _normalize_knowledge_point_ids(
+        raw_ids: list[int | str], request: PlanRecommendationRequest
+    ) -> list[int]:
+        allowed_ids = {item.id for item in request.knowledge_points}
+        ids_by_name = {item.name: item.id for item in request.knowledge_points}
+        normalized: list[int] = []
+        for raw_id in raw_ids:
+            candidate: int | None = None
+            if isinstance(raw_id, int):
+                candidate = raw_id
+            elif isinstance(raw_id, str):
+                value = raw_id.strip()
+                if value in ids_by_name:
+                    candidate = ids_by_name[value]
+                else:
+                    try:
+                        candidate = int(value)
+                    except ValueError:
+                        candidate = None
+            if candidate is None or candidate not in allowed_ids:
+                raise ServiceError(
+                    "AI_OUTPUT_INVALID",
+                    "模型返回了输入范围外的 knowledgePointId",
+                    status_code=422,
+                )
+            normalized.append(candidate)
+        return list(dict.fromkeys(normalized))[:10]
+
+    @staticmethod
+    def _validate_prerequisites(
+        tasks: list[PlanTaskItem], request: PlanRecommendationRequest
+    ) -> None:
+        first_task: dict[int, int] = {}
+        for task_index, task in enumerate(tasks):
+            for knowledge_point_id in task.knowledge_point_ids:
+                first_task.setdefault(int(knowledge_point_id), task_index)
+        satisfied = set(request.satisfied_prerequisite_ids)
+        for dependency in request.knowledge_dependencies:
+            successor_task = first_task.get(dependency.successor_id)
+            if successor_task is None or dependency.predecessor_id in satisfied:
+                continue
+            predecessor_task = first_task.get(dependency.predecessor_id)
+            if predecessor_task is None:
+                raise ServiceError(
+                    "AI_OUTPUT_INVALID",
+                    "后续知识点已出现，但未满足的前置知识点没有任务覆盖",
+                    status_code=422,
+                )
+            if predecessor_task > successor_task:
+                raise ServiceError(
+                    "AI_OUTPUT_INVALID",
+                    "模型任务顺序违反前置知识约束",
+                    status_code=422,
+                )
 
     def _parse(self, content: str) -> PlanRecommendationModelOutput:
         cleaned = content.strip()

@@ -4,6 +4,8 @@ import com.adaptivelearning.shared.domain.BaseEntity;
 import com.baomidou.mybatisplus.annotation.TableName;
 import lombok.Getter;
 import lombok.Setter;
+import com.fasterxml.jackson.databind.annotation.JsonSerialize;
+import com.fasterxml.jackson.databind.ser.std.ToStringSerializer;
 
 import java.time.Instant;
 import java.time.LocalDate;
@@ -13,10 +15,10 @@ import java.time.LocalDate;
 @TableName("self_assessment")
 public class SelfAssessmentEntity extends BaseEntity {
     private Long userId;
+    @JsonSerialize(using = ToStringSerializer.class)
     private Long knowledgePointId;
     private Integer level;
     private Instant assessedAt;
     private LocalDate lastStudiedAt;
     private String note;
 }
-

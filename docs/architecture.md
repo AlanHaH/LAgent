@@ -50,7 +50,7 @@ flowchart LR
 
 ## 学习闭环的持久化
 
-- 计划发布后，Java 为同一目标的相邻任务建立 `task_dependency`；开始或恢复后续任务时再次校验前置状态。
+- 计划发布后，Java 只把 `knowledge_dependency` 经任务候选投影得到的真实前置边写入当前 plan scope 的 `task_dependency`；普通排期先后不等于业务依赖，Goal-level 与不同 Project 之间不会被强制串联。开始或恢复后续任务时再次校验前置状态。
 - 学习者进入“任务”页时，Java 将已发布计划形成的正式任务、目标和 `task_dependency` 投影为只读知识图谱。前端展示完整路径，并仅开放用户时区下当天节点进入执行详情；未来节点可见但不可执行。
 - 任务辅导使用 `tutoring_session` 和 `tutoring_message` 保存完整会话、消息及引用元数据，页面刷新后可恢复，清空操作关闭旧会话。模型调用不把“1M 上下文”当成无限容量：默认从最新消息向前选取最多 400 条、60 万字符，按时间顺序发送，剩余窗口留给系统提示、当前问题、检索证据和输出。
 - `task_knowledge_source` 保存正式任务与授权 Chunk 的关系；任务详情展示文档、Chunk、页码与引用预览，文档正文仍由 `document_chunk` 作为权威来源。

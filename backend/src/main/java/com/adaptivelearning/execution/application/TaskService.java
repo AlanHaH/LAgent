@@ -4,7 +4,6 @@ import com.adaptivelearning.execution.domain.*;
 import com.adaptivelearning.execution.infrastructure.ExecutionMappers.CompletionSummaryMapper;
 import com.adaptivelearning.execution.infrastructure.ExecutionMappers.NoteMapper;
 import com.adaptivelearning.execution.infrastructure.ExecutionMappers.NoteVersionMapper;
-import com.adaptivelearning.execution.infrastructure.ExecutionMappers.SessionMapper;
 import com.adaptivelearning.execution.infrastructure.LearningTaskMapper;
 import com.adaptivelearning.execution.infrastructure.TutoringMappers.TutoringMessageMapper;
 import com.adaptivelearning.execution.infrastructure.TutoringMappers.TutoringSessionMapper;
@@ -38,13 +37,13 @@ import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 
 @Service
 @RequiredArgsConstructor
 public class TaskService {
     private final LearningTaskMapper taskMapper;
-    private final SessionMapper sessionMapper;
     private final StudySessionService sessions;
     private final NoteMapper noteMapper;
     private final NoteVersionMapper noteVersionMapper;
@@ -58,6 +57,9 @@ public class TaskService {
     private final AuditService audit;
     private final PythonAiServiceClient pythonAi;
     private final LearningBlockService learningBlocks;
+    private final TaskExecutionEligibilityService eligibility;
+    private final TaskCancellationService cancellations;
+    private final TaskAcceptancePolicy acceptancePolicy;
 
     @Value("${app.task-chat.history-max-messages:400}")
     private int taskChatHistoryMaxMessages;
@@ -67,21 +69,33 @@ public class TaskService {
     public record DependencyView(String publicId, String title, String status) {
     }
 
-    public record KnowledgeSourceView(long chunkId, String documentId, String documentName,
+    public record KnowledgeSourceView(String chunkId, String documentId, String documentName,
                                       int chunkNo, String quotePreview,
                                       Integer pageFrom, Integer pageTo) {
     }
 
+    public record ParentContextView(String publicId, String name, String status) { }
+
+    public record CompletionSummaryView(String learnedText, String difficultyText,
+                                        Integer qualityLevel, Integer confidenceLevel,
+                                        String remainingQuestions, int revisionNo,
+                                        Instant createdAt) { }
+
     public record TaskView(LearningTaskEntity task, String scheduleStatus, boolean ownerGoalPaused,
                            long effectiveSeconds, List<DependencyView> prerequisites,
                            List<KnowledgeSourceView> knowledgeSources,
-                           Map<String, Object> learningBlock) {
+                           Map<String, Object> learningBlock,
+                           String blockedReason, boolean replanRequired, boolean availableToday,
+                           ParentContextView project, ParentContextView milestone,
+                           TaskAcceptancePolicy.Snapshot acceptance,
+                           CompletionSummaryView completionSummary) {
     }
 
     public record TaskGraphNode(String publicId, String title, String goalId, String goalName,
                                 String taskType, String priority, int estimatedMinutes,
                                 Instant scheduledStart, Instant dueAt, String status,
-                                boolean availableToday, String temporalState) {
+                                boolean availableToday, String temporalState,
+                                String blockedReason, boolean replanRequired) {
     }
 
     public record TaskGraphEdge(String source, String target) {
@@ -131,44 +145,48 @@ public class TaskService {
         ZoneId zone = ZoneId.of(timezone);
         LocalDate today = LocalDate.now(zone);
         List<TaskGraphNode> nodes = jdbc.query("""
-                SELECT t.public_id,t.title,g.public_id,g.name,t.task_type,t.priority,t.estimated_minutes,
-                       t.scheduled_start,t.due_at,t.lifecycle_status,g.status AS goal_status,
-                       NOT EXISTS (
-                           SELECT 1
-                           FROM task_dependency dependency
-                           JOIN learning_task predecessor ON predecessor.id=dependency.predecessor_task_id
-                           LEFT JOIN learning_block predecessor_block ON predecessor_block.task_id=predecessor.id
-                               AND predecessor_block.deleted_at IS NULL
-                           WHERE dependency.successor_task_id=t.id
-                             AND (predecessor.lifecycle_status<>'COMPLETED'
-                                  OR (predecessor_block.id IS NOT NULL AND predecessor_block.status<>'COMPLETED'))
-                       ) AS prerequisites_ready
+                SELECT t.id,t.public_id,t.user_id,t.goal_id,t.project_id,t.milestone_id,t.origin_plan_version_id,
+                       t.title,g.public_id AS goal_public_id,g.name AS goal_name,t.task_type,t.priority,
+                       t.estimated_minutes,t.scheduled_start,t.due_at,t.lifecycle_status
                 FROM learning_task t
                 JOIN learning_goal g ON g.id=t.goal_id AND g.deleted_at IS NULL
                 WHERE t.user_id=?
                   AND t.origin_plan_version_id IS NOT NULL
                   AND t.deleted_at IS NULL
-                  AND t.lifecycle_status<>'CANCELED'
                 ORDER BY g.created_at,t.scheduled_start,t.due_at,t.id
                 """, (rs, row) -> {
+            LearningTaskEntity task = new LearningTaskEntity();
+            task.setId(rs.getLong("id"));
+            task.setPublicId(rs.getString("public_id"));
+            task.setUserId(rs.getLong("user_id"));
+            task.setGoalId(rs.getLong("goal_id"));
+            task.setProjectId((Long) rs.getObject("project_id"));
+            task.setMilestoneId((Long) rs.getObject("milestone_id"));
+            task.setOriginPlanVersionId((Long) rs.getObject("origin_plan_version_id"));
+            task.setTitle(rs.getString("title"));
+            task.setTaskType(rs.getString("task_type"));
+            task.setPriority(rs.getString("priority"));
+            task.setEstimatedMinutes(rs.getInt("estimated_minutes"));
             var scheduledTimestamp = rs.getTimestamp("scheduled_start");
             var dueTimestamp = rs.getTimestamp("due_at");
             Instant scheduledStart = scheduledTimestamp == null ? null : scheduledTimestamp.toInstant();
             Instant dueAt = dueTimestamp == null ? null : dueTimestamp.toInstant();
+            task.setScheduledStart(scheduledStart);
+            task.setDueAt(dueAt);
+            task.setLifecycleStatus(rs.getString("lifecycle_status"));
             Instant taskTime = scheduledStart != null ? scheduledStart : dueAt;
             LocalDate taskDate = taskTime == null ? null : taskTime.atZone(zone).toLocalDate();
-            boolean availableToday = today.equals(taskDate)
-                    && "ACTIVE".equals(rs.getString("goal_status"))
-                    && rs.getBoolean("prerequisites_ready")
-                    && !"COMPLETED".equals(rs.getString("lifecycle_status"));
+            TaskExecutionEligibilityService.Evaluation evaluation = eligibility.evaluateReadOnly(task);
             String temporalState = taskDate == null ? "UNSCHEDULED"
                     : taskDate.isAfter(today) ? "FUTURE"
                     : taskDate.isBefore(today) ? "PAST"
                     : "TODAY";
             return new TaskGraphNode(
-                    rs.getString(1), rs.getString(2), rs.getString(3), rs.getString(4),
-                    rs.getString(5), rs.getString(6), rs.getInt(7),
-                    scheduledStart, dueAt, rs.getString(10), availableToday, temporalState);
+                    task.getPublicId(), task.getTitle(), rs.getString("goal_public_id"),
+                    rs.getString("goal_name"), task.getTaskType(), task.getPriority(),
+                    task.getEstimatedMinutes(), scheduledStart, dueAt, task.getLifecycleStatus(),
+                    evaluation.decision().allowed(), temporalState, evaluation.decision().code(),
+                    evaluation.decision().replanRequired());
         }, user);
         List<TaskGraphEdge> edges = jdbc.query("""
                 SELECT predecessor.public_id,successor.public_id
@@ -179,8 +197,6 @@ public class TaskService {
                   AND predecessor.origin_plan_version_id IS NOT NULL
                   AND successor.origin_plan_version_id IS NOT NULL
                   AND predecessor.deleted_at IS NULL AND successor.deleted_at IS NULL
-                  AND predecessor.lifecycle_status<>'CANCELED'
-                  AND successor.lifecycle_status<>'CANCELED'
                 ORDER BY predecessor.scheduled_start,successor.scheduled_start
                 """, (rs, row) -> new TaskGraphEdge(rs.getString(1), rs.getString(2)), user, user);
         return new TaskGraphView(today, timezone, nodes, edges);
@@ -190,6 +206,16 @@ public class TaskService {
     public TaskView update(String id, UpdateInput i) {
         LearningTaskEntity t = owned(id);
         version(t, i.version());
+        List<String> changedFields = changedFields(i);
+        if (changedFields.isEmpty()) return view(t);
+        if (Set.of("COMPLETED", "CANCELED").contains(t.getLifecycleStatus())) {
+            throw new BusinessException(ErrorCode.STATE_TRANSITION_INVALID,
+                    "终态任务不能修改正式业务字段");
+        }
+        if (t.getOriginPlanVersionId() != null) {
+            throw new BusinessException(ErrorCode.PLAN_CONFIRMATION_REQUIRED,
+                    "正式计划任务必须通过计划提案修改");
+        }
         if (Boolean.TRUE.equals(t.getLockedSchedule()) && (i.scheduledStart() != null || i.dueAt() != null))
             throw new BusinessException(ErrorCode.PLAN_CONFIRMATION_REQUIRED, "锁定任务的时间不能直接修改");
         if (i.title() != null) {
@@ -207,75 +233,105 @@ public class TaskService {
         if (t.getScheduledStart() != null && t.getDueAt() != null && !t.getDueAt().isAfter(t.getScheduledStart()))
             bad();
         if (taskMapper.updateById(t) != 1) conflict();
+        audit.record("TASK_LEGACY_UPDATED", "LEARNING_TASK", t.getPublicId(),
+                "version=" + i.version(), "fields=" + String.join(",", changedFields), "SUCCESS");
         return view(owned(id));
     }
 
     @Transactional
-    public TaskView transition(String id, String target, String reason, CompletionInput summary, boolean confirmed) {
-        LearningTaskEntity t = owned(id);
-        String from = t.getLifecycleStatus();
-        TaskStatusPolicy.require(from, target);
-        if ("IN_PROGRESS".equals(target)) {
-            requireExecutableToday(t);
-            requirePredecessorsComplete(t);
-        }
-        if ("CANCELED".equals(target) && (!confirmed || reason == null || reason.isBlank()))
-            throw new BusinessException(ErrorCode.PLAN_CONFIRMATION_REQUIRED, "取消任务必须确认并填写原因");
+    public TaskView transition(String id, String target, String reason, CompletionInput summary,
+                               boolean confirmed, TaskAcceptancePolicy.Confirmation acceptance) {
         if ("CANCELED".equals(target)) {
-            StudySessionEntity active = active(t.getId());
-            if (active != null) sessions.stop(active.getPublicId());
+            if (!confirmed)
+                throw new BusinessException(ErrorCode.PLAN_CONFIRMATION_REQUIRED, "取消任务必须二次确认");
+            cancellations.cancelUser(id, reason);
+            return view(owned(id));
         }
-        if ("PAUSED".equals(target)) {
-            StudySessionEntity running = running(t.getId());
-            if (running != null) sessions.pause(running.getPublicId());
-        }
-        if ("COMPLETED".equals(target)) {
-            learningBlocks.markAssessmentRequired(t.getId());
-            StudySessionEntity active = active(t.getId());
-            if (active != null) sessions.stop(active.getPublicId());
-            saveSummary(t, summary);
-            t.setProgressPercent(new BigDecimal("100"));
-            t.setCompletedAt(Instant.now());
-        }
-        if ("PAUSED".equals(target) && "COMPLETED".equals(from)) {
-            if (!confirmed || reason == null || reason.isBlank())
-                throw new BusinessException(ErrorCode.PLAN_CONFIRMATION_REQUIRED, "撤销完成必须确认并说明原因");
-            t.setCompletedAt(null);
-            t.setProgressPercent(BigDecimal.ZERO);
-        }
-        t.setLifecycleStatus(target);
-        if (taskMapper.updateById(t) != 1) conflict();
-        jdbc.update("INSERT INTO task_status_history(id,task_id,from_status,to_status,reason,event_at,operator_type,correlation_id) VALUES(?,?,?,?,?,?,?,?)", IdWorker.getId(), t.getId(), from, target, reason, Instant.now(), "USER", UUID.randomUUID().toString());
-        event(t, "TaskStatusChanged", Map.of("from", from, "to", target));
-        audit.record("TASK_" + target, "LEARNING_TASK", id, from, target + ":" + reason, "SUCCESS");
+
+        LearningTaskEntity task = switch (target) {
+            case "IN_PROGRESS" -> eligibility.lockAndRequire(id,
+                    TaskExecutionEligibilityPolicy.Action.TASK_START).task();
+            case "COMPLETED" -> eligibility.lockAndRequire(id,
+                    TaskExecutionEligibilityPolicy.Action.TASK_COMPLETE).task();
+            default -> eligibility.lockOwnedTask(id);
+        };
+        applyTransitionLocked(task, target, reason, summary, confirmed, acceptance);
         return view(owned(id));
+    }
+
+    @Transactional
+    public TaskView transition(String id, String target, String reason,
+                               CompletionInput summary, boolean confirmed) {
+        return transition(id, target, reason, summary, confirmed, null);
     }
 
     @Transactional
     public StudySessionEntity startTask(String id, boolean startTimer) {
-        LearningTaskEntity t = owned(id);
-        requireExecutableToday(t);
-        if ("NOT_STARTED".equals(t.getLifecycleStatus()) || "PAUSED".equals(t.getLifecycleStatus()))
-            transition(id, "IN_PROGRESS", "开始执行", null, false);
-        else if (!"IN_PROGRESS".equals(t.getLifecycleStatus()))
+        LearningTaskEntity task = eligibility.lockAndRequire(id,
+                TaskExecutionEligibilityPolicy.Action.TASK_START).task();
+        if ("NOT_STARTED".equals(task.getLifecycleStatus()) || "PAUSED".equals(task.getLifecycleStatus())
+                || "BLOCKED".equals(task.getLifecycleStatus()))
+            applyTransitionLocked(task, "IN_PROGRESS", "开始执行", null, false, null);
+        else if (!"IN_PROGRESS".equals(task.getLifecycleStatus()))
             throw new BusinessException(ErrorCode.STATE_TRANSITION_INVALID, "当前任务不能开始");
-        return startTimer ? sessions.start(id) : null;
+        return startTimer ? sessions.startForLockedTask(task) : null;
     }
 
-    private void requireExecutableToday(LearningTaskEntity task) {
-        String timezone = jdbc.queryForObject("SELECT timezone FROM sys_user WHERE id=?", String.class,
-                task.getUserId());
-        ZoneId zone = ZoneId.of(timezone);
-        Instant anchor = task.getScheduledStart() != null ? task.getScheduledStart() : task.getDueAt();
-        if (anchor == null || !LocalDate.now(zone).equals(anchor.atZone(zone).toLocalDate())) {
-            throw new BusinessException(ErrorCode.STATE_TRANSITION_INVALID, "只能开始今天排期的任务");
+    private void applyTransitionLocked(LearningTaskEntity task, String target, String reason,
+                                       CompletionInput summary, boolean confirmed,
+                                       TaskAcceptancePolicy.Confirmation acceptance) {
+        String from = task.getLifecycleStatus();
+        TaskStatusPolicy.require(from, target);
+        if ("PAUSED".equals(target)) {
+            if ("COMPLETED".equals(from)) {
+                if (!confirmed || reason == null || reason.isBlank())
+                    throw new BusinessException(ErrorCode.PLAN_CONFIRMATION_REQUIRED,
+                            "撤销完成必须确认并说明原因");
+                requireNoStartedSuccessors(task);
+                task.setCompletedAt(null);
+                task.setProgressPercent(BigDecimal.ZERO);
+            } else {
+                sessions.pauseRunningForTaskLocked(task.getId(), task.getUserId());
+            }
         }
-        String goalStatus = jdbc.queryForObject(
-                "SELECT status FROM learning_goal WHERE id=? AND user_id=? AND deleted_at IS NULL",
-                String.class, task.getGoalId(), task.getUserId());
-        if (!"ACTIVE".equals(goalStatus)) {
-            throw new BusinessException(ErrorCode.STATE_TRANSITION_INVALID, "目标未处于进行中，不能执行任务");
+        if ("COMPLETED".equals(target)) {
+            TaskAcceptancePolicy.Snapshot acceptanceSnapshot = acceptancePolicy.snapshot(task.getAcceptanceJson());
+            acceptancePolicy.requireConfirmed(acceptanceSnapshot, acceptance);
+            CompletionInput validatedSummary = validatedSummary(summary);
+            learningBlocks.markAssessmentRequired(task.getId());
+            sessions.stopOpenForTaskLocked(task.getId(), task.getUserId());
+            saveSummary(task, validatedSummary);
+            task.setProgressPercent(new BigDecimal("100"));
+            task.setCompletedAt(Instant.now());
         }
+        task.setLifecycleStatus(target);
+        if (taskMapper.updateById(task) != 1) conflict();
+        String correlationId = UUID.randomUUID().toString();
+        if (jdbc.update("INSERT INTO task_status_history(id,task_id,from_status,to_status,reason,event_at,operator_type,correlation_id) VALUES(?,?,?,?,?,?,?,?)",
+                IdWorker.getId(), task.getId(), from, target, reason, Instant.now(), "USER", correlationId) != 1)
+            conflict();
+        event(task, "TaskStatusChanged", Map.of("from", from, "to", target, "source", "USER"));
+        audit.record("TASK_" + target, "LEARNING_TASK", task.getPublicId(), from,
+                target + ":" + reason, "SUCCESS");
+    }
+
+    private void requireNoStartedSuccessors(LearningTaskEntity task) {
+        Integer total = jdbc.queryForObject(
+                "SELECT COUNT(*) FROM task_dependency WHERE predecessor_task_id=?", Integer.class, task.getId());
+        List<String> validStatuses = jdbc.query("""
+                SELECT successor.lifecycle_status
+                FROM task_dependency dependency
+                JOIN learning_task successor ON successor.id=dependency.successor_task_id
+                WHERE dependency.predecessor_task_id=? AND successor.user_id=?
+                  AND successor.deleted_at IS NULL
+                ORDER BY successor.id FOR UPDATE
+                """, (rs, row) -> rs.getString(1), task.getId(), task.getUserId());
+        if (total == null || total != validStatuses.size())
+            throw new BusinessException(ErrorCode.DEPENDENCY_DATA_INVALID,
+                    "后继任务依赖数据异常，不能撤销完成");
+        if (validStatuses.stream().anyMatch(status -> !Set.of("NOT_STARTED", "BLOCKED", "CANCELED").contains(status)))
+            throw new BusinessException(ErrorCode.STATE_TRANSITION_INVALID,
+                    "后继任务已经开始，不能撤销前置任务完成状态");
     }
 
     public NoteView note(String taskId) {
@@ -318,9 +374,6 @@ public class TaskService {
     }
 
     private void saveSummary(LearningTaskEntity t, CompletionInput i) {
-        if (i == null) return;
-        if (i.qualityLevel() != null && (i.qualityLevel() < 1 || i.qualityLevel() > 5) || i.confidenceLevel() != null && (i.confidenceLevel() < 1 || i.confidenceLevel() > 5))
-            bad();
         TaskCompletionSummaryEntity s = summaryMapper.selectOne(new LambdaQueryWrapper<TaskCompletionSummaryEntity>().eq(TaskCompletionSummaryEntity::getTaskId, t.getId()));
         if (s == null) {
             s = new TaskCompletionSummaryEntity();
@@ -338,19 +391,50 @@ public class TaskService {
         else summaryMapper.updateById(s);
     }
 
+    private CompletionInput validatedSummary(CompletionInput input) {
+        if (input == null || input.learnedText() == null) {
+            throw new BusinessException(ErrorCode.COMMON_VALIDATION_ERROR, "完成总结不能为空");
+        }
+        String learned = input.learnedText().trim();
+        if (learned.isEmpty() || learned.length() > 3000) {
+            throw new BusinessException(ErrorCode.COMMON_VALIDATION_ERROR,
+                    "完成总结长度必须为 1 至 3000 字");
+        }
+        if (input.qualityLevel() != null && (input.qualityLevel() < 1 || input.qualityLevel() > 5)
+                || input.confidenceLevel() != null
+                && (input.confidenceLevel() < 1 || input.confidenceLevel() > 5)) {
+            bad();
+        }
+        String difficulty = trimOptional(input.difficultyText());
+        String questions = trimOptional(input.remainingQuestions());
+        if (difficulty != null && difficulty.length() > 3000
+                || questions != null && questions.length() > 3000) bad();
+        return new CompletionInput(learned, difficulty, input.qualityLevel(),
+                input.confidenceLevel(), questions);
+    }
+
+    private String trimOptional(String value) {
+        if (value == null) return null;
+        String trimmed = value.trim();
+        return trimmed.isEmpty() ? null : trimmed;
+    }
+
     private TaskView view(LearningTaskEntity t) {
         long seconds = Optional.ofNullable(jdbc.queryForObject("SELECT COALESCE(SUM(effective_seconds),0) FROM study_session WHERE task_id=? AND status='COMPLETED' AND deleted_at IS NULL", Long.class, t.getId())).orElse(0L);
         Integer paused = jdbc.queryForObject("SELECT COUNT(*) FROM learning_goal WHERE id=? AND status='PAUSED'", Integer.class, t.getGoalId());
-        List<DependencyView> prerequisites = jdbc.query("""
+        TaskExecutionEligibilityService.Evaluation evaluation = eligibility.evaluateReadOnly(t);
+        List<DependencyView> prerequisites = "DEPENDENCY_DATA_INVALID".equals(evaluation.decision().code())
+                ? List.of() : jdbc.query("""
                 SELECT p.public_id,p.title,
                        CASE WHEN p.lifecycle_status='COMPLETED' AND block.id IS NOT NULL AND block.status<>'COMPLETED'
                             THEN 'ASSESSMENT_REQUIRED' ELSE p.lifecycle_status END AS effective_status
                 FROM task_dependency d
                 JOIN learning_task p ON p.id=d.predecessor_task_id
                 LEFT JOIN learning_block block ON block.task_id=p.id AND block.deleted_at IS NULL
-                WHERE d.successor_task_id=? AND p.deleted_at IS NULL
+                WHERE d.successor_task_id=? AND p.user_id=? AND p.deleted_at IS NULL
                 ORDER BY p.scheduled_start,p.id
-                """, (rs, row) -> new DependencyView(rs.getString(1), rs.getString(2), rs.getString(3)), t.getId());
+                """, (rs, row) -> new DependencyView(rs.getString(1), rs.getString(2), rs.getString(3)),
+                t.getId(), t.getUserId());
         List<KnowledgeSourceView> knowledgeSources = jdbc.query("""
                 SELECT chunk.id,document.public_id,document.display_name,chunk.chunk_no,
                        chunk.text,chunk.page_from,chunk.page_to
@@ -364,12 +448,47 @@ public class TaskService {
             String preview = Optional.ofNullable(rs.getString("text")).orElse("")
                     .replaceAll("\\s+", " ").trim();
             if (preview.length() > 300) preview = preview.substring(0, 300);
-            return new KnowledgeSourceView(rs.getLong("id"), rs.getString("public_id"),
+            return new KnowledgeSourceView(String.valueOf(rs.getLong("id")), rs.getString("public_id"),
                     rs.getString("display_name"), rs.getInt("chunk_no"), preview,
                     (Integer) rs.getObject("page_from"), (Integer) rs.getObject("page_to"));
         }, t.getId());
+        ParentContextView project = projectContext(t);
+        ParentContextView milestone = milestoneContext(t);
+        TaskCompletionSummaryEntity completion = summaryMapper.selectOne(
+                new LambdaQueryWrapper<TaskCompletionSummaryEntity>()
+                        .eq(TaskCompletionSummaryEntity::getTaskId, t.getId())
+                        .eq(TaskCompletionSummaryEntity::getUserId, t.getUserId()));
+        CompletionSummaryView completionView = completion == null ? null : new CompletionSummaryView(
+                completion.getLearnedText(), completion.getDifficultyText(), completion.getQualityLevel(),
+                completion.getConfidenceLevel(), completion.getRemainingQuestions(),
+                completion.getRevisionNo(), completion.getCreatedAt());
         return new TaskView(t, schedule(t), paused != null && paused > 0, seconds, prerequisites,
-                knowledgeSources, learningBlocks.summaryForTask(t.getId()));
+                knowledgeSources, learningBlocks.summaryForTask(t.getId()), evaluation.decision().code(),
+                evaluation.decision().replanRequired(), evaluation.decision().allowed(), project, milestone,
+                acceptancePolicy.snapshot(t.getAcceptanceJson()), completionView);
+    }
+
+    private ParentContextView projectContext(LearningTaskEntity task) {
+        if (task.getProjectId() == null) return null;
+        List<ParentContextView> rows = jdbc.query("""
+                SELECT public_id,name,status FROM learning_project
+                WHERE id=? AND user_id=? AND deleted_at IS NULL
+                """, (rs, row) -> new ParentContextView(rs.getString(1), rs.getString(2), rs.getString(3)),
+                task.getProjectId(), task.getUserId());
+        return rows.isEmpty() ? null : rows.get(0);
+    }
+
+    private ParentContextView milestoneContext(LearningTaskEntity task) {
+        if (task.getMilestoneId() == null) return null;
+        List<ParentContextView> rows = jdbc.query("""
+                SELECT milestone.public_id,milestone.name,milestone.status
+                FROM milestone
+                JOIN learning_project project ON project.id=milestone.project_id
+                WHERE milestone.id=? AND project.user_id=?
+                  AND milestone.deleted_at IS NULL AND project.deleted_at IS NULL
+                """, (rs, row) -> new ParentContextView(rs.getString(1), rs.getString(2), rs.getString(3)),
+                task.getMilestoneId(), task.getUserId());
+        return rows.isEmpty() ? null : rows.get(0);
     }
 
     private String schedule(LearningTaskEntity t) {
@@ -394,21 +513,7 @@ public class TaskService {
         e.setAttempts(0);
         e.setNextRetryAt(Instant.now());
         e.setCreatedAt(Instant.now());
-        outboxMapper.insert(e);
-    }
-
-    private StudySessionEntity running(long task) {
-        return sessionMapper.selectOne(new LambdaQueryWrapper<StudySessionEntity>().eq(StudySessionEntity::getTaskId, task).eq(StudySessionEntity::getStatus, "RUNNING"));
-    }
-
-    private StudySessionEntity active(long task) {
-        // 同一任务可能残留多条 PAUSED 会话（每次开始计时都会新建会话），必须取最新一条，
-        // selectOne 匹配多条会抛 TooManyResultsException 导致完成/取消事务整体回滚
-        return sessionMapper.selectList(new LambdaQueryWrapper<StudySessionEntity>()
-                        .eq(StudySessionEntity::getTaskId, task)
-                        .in(StudySessionEntity::getStatus, "RUNNING", "PAUSED")
-                        .orderByDesc(StudySessionEntity::getCreatedAt))
-                .stream().findFirst().orElse(null);
+        if (outboxMapper.insert(e) != 1) conflict();
     }
 
     public TaskChatHistory chatHistory(String id) {
@@ -544,25 +649,21 @@ public class TaskService {
         return result;
     }
 
-    private void requirePredecessorsComplete(LearningTaskEntity task) {
-        List<String> blockers = jdbc.query("""
-                SELECT p.title
-                FROM task_dependency d
-                JOIN learning_task p ON p.id=d.predecessor_task_id
-                LEFT JOIN learning_block block ON block.task_id=p.id AND block.deleted_at IS NULL
-                WHERE d.successor_task_id=? AND p.deleted_at IS NULL
-                  AND (p.lifecycle_status<>'COMPLETED' OR block.id IS NOT NULL AND block.status<>'COMPLETED')
-                ORDER BY p.scheduled_start,p.id
-                """, (rs, row) -> rs.getString(1), task.getId());
-        if (!blockers.isEmpty())
-            throw new BusinessException(ErrorCode.STATE_TRANSITION_INVALID,
-                    "请先完成前置任务：" + String.join("、", blockers));
-    }
-
     private LearningTaskEntity owned(String id) {
         LearningTaskEntity t = taskMapper.selectOne(new LambdaQueryWrapper<LearningTaskEntity>().eq(LearningTaskEntity::getPublicId, id).eq(LearningTaskEntity::getUserId, SecurityUtils.currentUserId()));
         if (t == null) throw new BusinessException(ErrorCode.RESOURCE_NOT_FOUND, "资源不存在");
         return t;
+    }
+
+    private List<String> changedFields(UpdateInput input) {
+        List<String> fields = new ArrayList<>();
+        if (input.title() != null) fields.add("title");
+        if (input.description() != null) fields.add("description");
+        if (input.priority() != null) fields.add("priority");
+        if (input.estimatedMinutes() != null) fields.add("estimatedMinutes");
+        if (input.scheduledStart() != null) fields.add("scheduledStart");
+        if (input.dueAt() != null) fields.add("dueAt");
+        return fields;
     }
 
     private void version(com.adaptivelearning.shared.domain.BaseEntity e, Integer v) {

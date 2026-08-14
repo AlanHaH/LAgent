@@ -1,6 +1,8 @@
 package com.adaptivelearning.profile.api;
 
 import com.adaptivelearning.shared.ai.AiModelClient;
+import com.adaptivelearning.shared.ai.AiModelException;
+import com.adaptivelearning.shared.exception.ErrorCode;
 import com.adaptivelearning.support.application.EmailVerificationPurpose;
 import com.adaptivelearning.support.application.VerificationMailService;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -35,6 +37,42 @@ class ProfileInterviewIntegrationTest {
     @Autowired ObjectMapper json;
     @MockBean VerificationMailService mailService;
     @MockBean AiModelClient modelClient;
+
+    @Test
+    void timeoutFallbackDraftCanStillBeConfirmedAndVersioned() throws Exception {
+        String token = register("profile_fallback", "profile-fallback@example.com");
+        when(modelClient.isConfigured()).thenReturn(true);
+        when(modelClient.complete(anyString(), anyString()))
+                .thenThrow(new AiModelException(ErrorCode.MODEL_REQUEST_TIMEOUT));
+
+        String started = mvc.perform(post("/api/v1/profiles/me/interview-sessions")
+                        .header("Authorization", "Bearer " + token).contentType(MediaType.APPLICATION_JSON).content("{}"))
+                .andExpect(status().isCreated()).andReturn().getResponse().getContentAsString();
+        JsonNode initial = json.readTree(started).path("data");
+        String sessionId = initial.path("id").asText();
+
+        String turn = mvc.perform(post("/api/v1/profiles/me/interview-sessions/{id}/messages", sessionId)
+                        .header("Authorization", "Bearer " + token).contentType(MediaType.APPLICATION_JSON)
+                        .content(json.writeValueAsString(java.util.Map.of("content",
+                                "我想学习计算机科学，零基础，从 2026-08-01 到 2026-08-31，周一 19:00-21:00 有空。",
+                                "version", initial.path("version").asInt()))))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data.assistantMode").value("GUIDED"))
+                .andExpect(jsonPath("$.data.readyToConfirm").value(true))
+                .andReturn().getResponse().getContentAsString();
+
+        String confirmed = mvc.perform(post("/api/v1/profiles/me/interview-sessions/{id}/confirmation", sessionId)
+                        .header("Authorization", "Bearer " + token).contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"version\":" + json.readTree(turn).path("data").path("version").asInt() + "}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data.generationJob.status").value("QUEUED"))
+                .andReturn().getResponse().getContentAsString();
+        awaitGeneration(token, json.readTree(confirmed).path("data").path("generationJob").path("publicId").asText());
+
+        mvc.perform(get("/api/v1/profiles/me/versions").header("Authorization", "Bearer " + token))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data[0].confidence").value(0.10));
+    }
 
     @Test
     void aiDraftRequiresConfirmationThenPersistsCustomDatesAndVersion() throws Exception {

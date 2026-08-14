@@ -22,7 +22,7 @@ type Metric = {
 }
 
 type MasterySnapshot = {
-  knowledgePointId: number
+  knowledgePointId: string
   name: string
   score: number | string
   confidence: number | string

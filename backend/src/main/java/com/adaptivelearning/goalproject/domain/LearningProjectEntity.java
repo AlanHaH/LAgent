@@ -4,6 +4,8 @@ import com.adaptivelearning.shared.domain.BaseEntity;
 import com.baomidou.mybatisplus.annotation.TableName;
 import lombok.Getter;
 import lombok.Setter;
+import com.fasterxml.jackson.databind.annotation.JsonSerialize;
+import com.fasterxml.jackson.databind.ser.std.ToStringSerializer;
 
 import java.time.LocalDate;
 
@@ -13,6 +15,7 @@ import java.time.LocalDate;
 public class LearningProjectEntity extends BaseEntity {
     private String publicId;
     private Long userId;
+    @JsonSerialize(using = ToStringSerializer.class)
     private Long primaryDirectionId;
     private String name;
     private String description;
@@ -23,4 +26,3 @@ public class LearningProjectEntity extends BaseEntity {
     private String deliverableJson;
     private String repositoryUrl;
 }
-

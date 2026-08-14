@@ -4,6 +4,8 @@ import com.adaptivelearning.shared.domain.BaseEntity;
 import com.baomidou.mybatisplus.annotation.TableName;
 import lombok.Getter;
 import lombok.Setter;
+import com.fasterxml.jackson.databind.annotation.JsonSerialize;
+import com.fasterxml.jackson.databind.ser.std.ToStringSerializer;
 
 import java.math.BigDecimal;
 import java.time.Instant;
@@ -14,6 +16,7 @@ import java.time.LocalDate;
 @TableName("milestone")
 public class MilestoneEntity extends BaseEntity {
     private String publicId;
+    @JsonSerialize(using = ToStringSerializer.class)
     private Long projectId;
     private String name;
     private Integer sequenceNo;
@@ -24,4 +27,3 @@ public class MilestoneEntity extends BaseEntity {
     private String completionEvidenceJson;
     private Instant completedAt;
 }
-

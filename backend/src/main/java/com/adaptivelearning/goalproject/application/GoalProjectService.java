@@ -1,6 +1,7 @@
 package com.adaptivelearning.goalproject.application;
 
 import com.adaptivelearning.evaluation.application.AssessmentService;
+import com.adaptivelearning.execution.application.TaskCancellationService;
 import com.adaptivelearning.goalproject.domain.*;
 import com.adaptivelearning.goalproject.infrastructure.GoalProjectMappers.*;
 import com.adaptivelearning.shared.api.PageResponse;
@@ -8,6 +9,7 @@ import com.adaptivelearning.shared.exception.BusinessException;
 import com.adaptivelearning.shared.exception.ErrorCode;
 import com.adaptivelearning.shared.security.SecurityUtils;
 import com.adaptivelearning.support.application.AuditService;
+import com.adaptivelearning.support.infrastructure.UserMapper;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.fasterxml.jackson.core.JsonProcessingException;
@@ -16,7 +18,6 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import lombok.RequiredArgsConstructor;
-import org.springframework.dao.EmptyResultDataAccessException;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -27,7 +28,6 @@ import java.net.URI;
 import java.time.Instant;
 import java.time.LocalDate;
 import java.util.*;
-import java.util.stream.Stream;
 
 @Service
 @RequiredArgsConstructor
@@ -40,6 +40,9 @@ public class GoalProjectService {
     private final ObjectMapper objectMapper;
     private final AuditService audit;
     private final AssessmentService assessments;
+    private final GoalRecommendationBatchStore recommendationBatches;
+    private final UserMapper userMapper;
+    private final TaskCancellationService taskCancellation;
 
     public record GoalInput(Long directionId, String customDirection, String name, String type, String description, String priority,
                             LocalDate startDate, LocalDate dueDate, int weeklyBudgetMinutes,
@@ -57,6 +60,12 @@ public class GoalProjectService {
                                  List<Map<String, Object>> acceptanceCriteria, Integer version) {
     }
 
+    public record MilestoneCompletionInput(Integer version, String summary,
+                                           List<Map<String, Object>> criteria) { }
+
+    public record GoalLinkView(String goalId, String goalName, String goalStatus,
+                               BigDecimal contributionWeight) { }
+
     public record CreateGoalResult(LearningGoalEntity goal, LearningProjectEntity project) {
     }
 
@@ -66,12 +75,16 @@ public class GoalProjectService {
     @Transactional
     public LearningGoalEntity createGoal(GoalInput input) {
         validateGoal(input);
-        requireGoalDirection(input);
+        String sourceType = sourceType(input);
+        GoalRecommendationBatchStore.VerifiedRecommendation recommendation = "CUSTOM".equals(sourceType)
+                ? null : recommendationBatches.verifyForAdoption(SecurityUtils.currentUserId(),
+                input.recommendationId(), sourceType, input.profileVersionId());
+        requireGoalDirection(input, recommendation);
         LearningGoalEntity goal = new LearningGoalEntity();
         goal.setPublicId(UUID.randomUUID().toString());
         goal.setUserId(SecurityUtils.currentUserId());
         apply(goal, input);
-        applySource(goal, input);
+        applySource(goal, input, recommendation);
         goal.setStatus(GoalStatus.DRAFT.name());
         goalMapper.insert(goal);
         audit.record("GOAL_CREATE", "LEARNING_GOAL", goal.getPublicId(), null, goal.getName(), "SUCCESS");
@@ -82,8 +95,11 @@ public class GoalProjectService {
     public LearningGoalEntity updateGoal(String publicId, GoalInput input) {
         LearningGoalEntity goal = ownedGoal(publicId);
         validateVersion(goal.getVersion(), input.version());
+        if (Set.of(GoalStatus.COMPLETED.name(), GoalStatus.CANCELED.name()).contains(goal.getStatus())) {
+            throw new BusinessException(ErrorCode.STATE_TRANSITION_INVALID, "已结束目标不可修改");
+        }
         validateGoal(input);
-        requireGoalDirection(input);
+        requireGoalDirectionForUpdate(goal, input);
         if (!GoalStatus.DRAFT.name().equals(goal.getStatus()) && (input.changeReason() == null || input.changeReason().isBlank())) {
             throw new BusinessException(ErrorCode.COMMON_VALIDATION_ERROR, "活动目标的关键修改必须填写变更原因");
         }
@@ -134,20 +150,19 @@ public class GoalProjectService {
 
     @Transactional
     public LearningGoalEntity transitionGoal(String publicId, GoalStatus target, String reason, boolean exceptionConfirmed) {
-        LearningGoalEntity goal = ownedGoal(publicId);
+        long userId = SecurityUtils.currentUserId();
+        lockUser(userId);
+        LearningGoalEntity goal = goalMapper.lockOwnedByPublicId(publicId, userId);
+        if (goal == null) notFound();
         GoalStatus current = GoalStatus.valueOf(goal.getStatus());
         current.requireCanTransitionTo(target);
         if (target == GoalStatus.ACTIVE) validateGoalActivation(goal);
         // 项目型目标首次「开始推进」时，同一事务联动激活配套 DRAFT 项目；
         // PAUSED→ACTIVE（resume）不联动，避免覆盖用户主动暂停项目的意图。
-        if (target == GoalStatus.ACTIVE && current == GoalStatus.DRAFT && "PROJECT".equals(goal.getType())) {
-            List<LearningProjectEntity> draftProjects = projectsForGoal(publicId).stream()
-                    .filter(p -> ProjectStatus.DRAFT.name().equals(p.getStatus())).toList();
-            for (LearningProjectEntity project : draftProjects) {
-                transitionProject(project.getPublicId(), ProjectStatus.ACTIVE,
-                        "目标「" + goal.getName() + "」开始推进，项目联动激活", false);
-            }
-        }
+        List<LearningProjectEntity> draftProjects = target == GoalStatus.ACTIVE && current == GoalStatus.DRAFT
+                && "PROJECT".equals(goal.getType())
+                ? projectsForGoal(publicId).stream().filter(p -> ProjectStatus.DRAFT.name().equals(p.getStatus())).toList()
+                : List.of();
         if (target == GoalStatus.COMPLETED && !criteriaComplete(goal.getSuccessCriteriaJson()) && !exceptionConfirmed) {
             throw new BusinessException(ErrorCode.COMMON_VALIDATION_ERROR, "成功标准尚未全部满足，需要明确例外确认");
         }
@@ -159,6 +174,15 @@ public class GoalProjectService {
             "criteria", readJson(goal.getSuccessCriteriaJson()), "exceptionConfirmed", exceptionConfirmed,
             "acceptedAt", Instant.now(), "reason", reason == null ? "" : reason)));
         if (goalMapper.updateById(goal) != 1) conflict();
+        if (target == GoalStatus.PAUSED) {
+            taskCancellation.quiesceGoal(goal.getId(), userId, TaskCancellationService.QuiesceMode.PAUSE);
+        } else if (target == GoalStatus.CANCELED || target == GoalStatus.COMPLETED) {
+            taskCancellation.quiesceGoal(goal.getId(), userId, TaskCancellationService.QuiesceMode.STOP);
+        }
+        for (LearningProjectEntity project : draftProjects) {
+            transitionProject(project.getPublicId(), ProjectStatus.ACTIVE,
+                    "目标「" + goal.getName() + "」开始推进，项目联动激活", false);
+        }
         audit.record("GOAL_" + target, "LEARNING_GOAL", publicId, current.name(), target + ":" + reason, "SUCCESS");
         return ownedGoal(publicId);
     }
@@ -221,7 +245,8 @@ public class GoalProjectService {
 
     @Transactional
     public LearningProjectEntity updateProject(String publicId, ProjectInput input) {
-        LearningProjectEntity project = ownedProject(publicId);
+        LearningProjectEntity project = ownedProjectForUpdate(publicId);
+        requireDraftProject(project);
         validateVersion(project.getVersion(), input.version());
         validateProject(input);
         apply(project, input);
@@ -245,7 +270,6 @@ public class GoalProjectService {
                 FROM learning_project p
                 JOIN goal_project gp ON gp.project_id=p.id
                 WHERE gp.goal_id=? AND p.user_id=? AND p.deleted_at IS NULL
-                  AND p.status NOT IN ('COMPLETED','CANCELED','ARCHIVED')
                 ORDER BY p.due_date,p.id
                 """, (rs, row) -> rs.getLong(1), goal.getId(), goal.getUserId());
         return ids.isEmpty() ? List.of() : ids.stream().map(projectMapper::selectById)
@@ -258,7 +282,7 @@ public class GoalProjectService {
 
     @Transactional
     public void linkGoal(String projectPublicId, String goalPublicId, BigDecimal weight) {
-        LearningProjectEntity project = ownedProject(projectPublicId);
+        LearningProjectEntity project = ownedProjectForUpdate(projectPublicId);
         LearningGoalEntity goal = ownedGoal(goalPublicId);
         if (Set.of("CANCELED", "COMPLETED").contains(goal.getStatus())
                 || !ProjectStatus.DRAFT.name().equals(project.getStatus()))
@@ -275,10 +299,42 @@ public class GoalProjectService {
         linkMapper.insert(link);
     }
 
+    @Transactional
     public void unlinkGoal(String projectPublicId, String goalPublicId) {
-        LearningProjectEntity project = ownedProject(projectPublicId);
+        LearningProjectEntity project = ownedProjectForUpdate(projectPublicId);
+        requireDraftProject(project);
         LearningGoalEntity goal = ownedGoal(goalPublicId);
         linkMapper.unlink(goal.getId(), project.getId());
+    }
+
+    public List<GoalLinkView> goalLinks(String projectPublicId) {
+        LearningProjectEntity project = ownedProject(projectPublicId);
+        return jdbc.query("""
+                SELECT g.public_id,g.name,g.status,gp.contribution_weight
+                FROM goal_project gp JOIN learning_goal g ON g.id=gp.goal_id
+                WHERE gp.project_id=? AND g.user_id=? AND g.deleted_at IS NULL
+                ORDER BY g.due_date,g.id
+                """, (rs, row) -> new GoalLinkView(rs.getString("public_id"), rs.getString("name"),
+                rs.getString("status"), rs.getBigDecimal("contribution_weight")),
+                project.getId(), project.getUserId());
+    }
+
+    @Transactional
+    public void updateGoalLink(String projectPublicId, String goalPublicId, BigDecimal weight) {
+        LearningProjectEntity project = ownedProjectForUpdate(projectPublicId);
+        requireDraftProject(project);
+        LearningGoalEntity goal = ownedGoal(goalPublicId);
+        BigDecimal other = Optional.ofNullable(jdbc.queryForObject("""
+                SELECT COALESCE(SUM(contribution_weight),0) FROM goal_project
+                WHERE goal_id=? AND project_id<>?
+                """, BigDecimal.class, goal.getId(), project.getId())).orElse(BigDecimal.ZERO);
+        if (weight == null || weight.signum() <= 0 || other.add(weight).compareTo(BigDecimal.ONE) > 0) {
+            throw new BusinessException(ErrorCode.COMMON_VALIDATION_ERROR, "目标的项目贡献权重合计不能超过 100%");
+        }
+        int updated = jdbc.update("""
+                UPDATE goal_project SET contribution_weight=? WHERE goal_id=? AND project_id=?
+                """, weight, goal.getId(), project.getId());
+        if (updated != 1) notFound();
     }
 
     public List<MilestoneEntity> milestones(String projectPublicId) {
@@ -289,7 +345,7 @@ public class GoalProjectService {
 
     @Transactional
     public MilestoneEntity addMilestone(String projectPublicId, MilestoneInput input) {
-        LearningProjectEntity project = ownedProject(projectPublicId);
+        LearningProjectEntity project = ownedProjectForUpdate(projectPublicId);
         requireDraftProject(project);
         validateMilestone(project, input);
         MilestoneEntity m = new MilestoneEntity();
@@ -303,8 +359,9 @@ public class GoalProjectService {
 
     @Transactional
     public MilestoneEntity updateMilestone(String publicId, MilestoneInput input) {
-        MilestoneEntity milestone = ownedMilestone(publicId);
-        LearningProjectEntity project = ownedProjectById(milestone.getProjectId());
+        MilestoneEntity observed = ownedMilestone(publicId);
+        LearningProjectEntity project = ownedProjectForUpdateById(observed.getProjectId());
+        MilestoneEntity milestone = ownedMilestoneForUpdate(publicId);
         requireDraftProject(project);
         validateVersion(milestone.getVersion(), input.version());
         validateMilestone(project, input);
@@ -314,19 +371,25 @@ public class GoalProjectService {
     }
 
     @Transactional
-    public MilestoneEntity completeMilestone(String publicId, Map<String, Object> evidence) {
-        MilestoneEntity milestone = ownedMilestone(publicId);
-        LearningProjectEntity project = ownedProjectById(milestone.getProjectId());
+    public MilestoneEntity completeMilestone(String publicId, MilestoneCompletionInput input) {
+        long userId = SecurityUtils.currentUserId();
+        lockUser(userId);
+        MilestoneEntity observed = ownedMilestone(publicId);
+        LearningProjectEntity project = ownedProjectForUpdateById(observed.getProjectId());
+        MilestoneEntity milestone = ownedMilestoneForUpdate(publicId);
+        if ("COMPLETED".equals(milestone.getStatus())) return milestone;
         if (!ProjectStatus.ACTIVE.name().equals(project.getStatus()))
             throw new BusinessException(ErrorCode.STATE_TRANSITION_INVALID, "只有进行中的项目可以验收里程碑");
         if ("CANCELED".equals(milestone.getStatus()))
             throw new BusinessException(ErrorCode.STATE_TRANSITION_INVALID, "已取消里程碑不能完成");
-        if (!allChecklistConfirmed(evidence))
-            throw new BusinessException(ErrorCode.COMMON_VALIDATION_ERROR, "必须逐项确认里程碑验收清单");
+        validateVersion(milestone.getVersion(), input == null ? null : input.version());
+        Map<String, Object> evidence = verifiedMilestoneEvidence(milestone, input);
         milestone.setStatus("COMPLETED");
         milestone.setCompletionEvidenceJson(json(evidence));
         milestone.setCompletedAt(Instant.now());
-        milestoneMapper.updateById(milestone);
+        if (milestoneMapper.updateById(milestone) != 1) conflict();
+        taskCancellation.quiesceMilestone(milestone.getId(), userId,
+                TaskCancellationService.QuiesceMode.STOP);
         assessments.recordProjectMilestoneEvidence(project.getUserId(), project.getId(), milestone.getId(),
                 milestone.getWeight(), milestone.getCompletedAt());
         emitProjectMilestoneEvent(project, milestone);
@@ -347,19 +410,26 @@ public class GoalProjectService {
 
     @Transactional
     public MilestoneEntity cancelMilestone(String publicId) {
-        MilestoneEntity milestone = ownedMilestone(publicId);
-        LearningProjectEntity project = ownedProjectById(milestone.getProjectId());
+        long userId = SecurityUtils.currentUserId();
+        lockUser(userId);
+        MilestoneEntity observed = ownedMilestone(publicId);
+        LearningProjectEntity project = ownedProjectForUpdateById(observed.getProjectId());
+        MilestoneEntity milestone = ownedMilestoneForUpdate(publicId);
         requireDraftProject(project);
         if ("COMPLETED".equals(milestone.getStatus()))
             throw new BusinessException(ErrorCode.STATE_TRANSITION_INVALID, "已完成里程碑不能取消");
         milestone.setStatus("CANCELED");
         if (milestoneMapper.updateById(milestone) != 1) conflict();
+        taskCancellation.quiesceMilestone(milestone.getId(), userId,
+                TaskCancellationService.QuiesceMode.STOP);
         return ownedMilestone(publicId);
     }
 
     @Transactional
     public LearningProjectEntity transitionProject(String publicId, ProjectStatus target, String reason, boolean impactConfirmed) {
-        LearningProjectEntity project = ownedProject(publicId);
+        long userId = SecurityUtils.currentUserId();
+        lockUser(userId);
+        LearningProjectEntity project = ownedProjectForUpdate(publicId);
         ProjectStatus current = ProjectStatus.valueOf(project.getStatus());
         current.requireCanTransitionTo(target);
         if (target == ProjectStatus.ACTIVE) validateProjectActivation(project, impactConfirmed);
@@ -372,7 +442,15 @@ public class GoalProjectService {
         if (target == ProjectStatus.CANCELED && (reason == null || reason.isBlank()))
             throw new BusinessException(ErrorCode.PLAN_CONFIRMATION_REQUIRED, "取消项目必须确认并填写原因");
         project.setStatus(target.name());
-        projectMapper.updateById(project);
+        if (projectMapper.updateById(project) != 1) conflict();
+        if (target == ProjectStatus.PAUSED) {
+            taskCancellation.quiesceProject(project.getId(), userId,
+                    TaskCancellationService.QuiesceMode.PAUSE);
+        } else if (target == ProjectStatus.CANCELED || target == ProjectStatus.COMPLETED
+                || target == ProjectStatus.ARCHIVED) {
+            taskCancellation.quiesceProject(project.getId(), userId,
+                    TaskCancellationService.QuiesceMode.STOP);
+        }
         audit.record("PROJECT_" + target, "LEARNING_PROJECT", publicId, current.name(), target + ":" + reason, "SUCCESS");
         return project;
     }
@@ -380,13 +458,16 @@ public class GoalProjectService {
     public Map<String, Object> progress(String goalPublicId) {
         LearningGoalEntity goal = ownedGoal(goalPublicId);
         List<Map<String, Object>> projects = jdbc.query("""
-            SELECT gp.contribution_weight, p.id, p.name,
+            SELECT gp.contribution_weight, p.id, p.public_id,p.name,p.status,
+                   CASE WHEN p.status='COMPLETED' THEN 1 ELSE
                    COALESCE(SUM(CASE WHEN m.status='COMPLETED' THEN m.weight ELSE 0 END)
                      / NULLIF(SUM(m.weight),0),0) project_progress
+                   END project_progress
             FROM goal_project gp JOIN learning_project p ON p.id=gp.project_id
             LEFT JOIN milestone m ON m.project_id=p.id AND m.status<>'CANCELED' AND m.deleted_at IS NULL
-            WHERE gp.goal_id=? GROUP BY gp.contribution_weight,p.id,p.name
-            """, (rs, row) -> Map.of("weight", rs.getBigDecimal("contribution_weight"), "projectId", rs.getLong("id"),
+            WHERE gp.goal_id=? AND p.deleted_at IS NULL AND p.status NOT IN ('CANCELED','ARCHIVED')
+            GROUP BY gp.contribution_weight,p.id,p.public_id,p.name,p.status
+            """, (rs, row) -> Map.of("weight", rs.getBigDecimal("contribution_weight"), "projectId", rs.getString("public_id"),
             "name", rs.getString("name"), "progress", rs.getBigDecimal("project_progress")), goal.getId());
         BigDecimal projectContribution = BigDecimal.ZERO;
         BigDecimal totalWeight = BigDecimal.ZERO;
@@ -398,6 +479,7 @@ public class GoalProjectService {
         Map<String, Object> taskProgress = directTaskProgress(goal.getId(), totalWeight.signum() == 0);
         BigDecimal t = (BigDecimal) taskProgress.get("ratio");
         BigDecimal value = totalWeight.signum() == 0 ? t : projectContribution.add(BigDecimal.ONE.subtract(totalWeight).multiply(t));
+        value = value.max(BigDecimal.ZERO).min(BigDecimal.ONE);
         return Map.of("value", value.multiply(BigDecimal.valueOf(100)).setScale(1, RoundingMode.HALF_UP),
             "numerator", value, "denominator", BigDecimal.ONE, "calculatedAt", Instant.now(),
             "projectComponents", projects, "nonProjectTasks", taskProgress, "metricVersion", "1.0");
@@ -406,14 +488,22 @@ public class GoalProjectService {
     private Map<String, Object> directTaskProgress(long goalId, boolean includeProjectTasks) {
         String filter = includeProjectTasks ? "" : " AND task.project_id IS NULL";
         Map<String, Object> value = jdbc.queryForMap("""
-            SELECT COALESCE(SUM(CASE WHEN task.lifecycle_status='COMPLETED' AND (block.id IS NULL OR block.status='COMPLETED')
+            SELECT COALESCE(SUM(CASE WHEN task.lifecycle_status='COMPLETED' AND NOT EXISTS (
+                                         SELECT 1 FROM learning_block block
+                                         WHERE block.task_id=task.id AND block.deleted_at IS NULL AND block.status<>'COMPLETED')
                                          THEN GREATEST(task.estimated_minutes,0) ELSE 0 END),0) done_minutes,
                    COALESCE(SUM(GREATEST(task.estimated_minutes,0)),0) total_minutes,
-                   SUM(CASE WHEN task.lifecycle_status='COMPLETED' AND (block.id IS NULL OR block.status='COMPLETED')
-                            THEN 1 ELSE 0 END) done_count, COUNT(*) total_count
+                   COALESCE(SUM(CASE WHEN task.lifecycle_status='COMPLETED' AND NOT EXISTS (
+                                         SELECT 1 FROM learning_block block
+                                         WHERE block.task_id=task.id AND block.deleted_at IS NULL AND block.status<>'COMPLETED')
+                            THEN 1 ELSE 0 END),0) done_count, COUNT(*) total_count
             FROM learning_task task
-            LEFT JOIN learning_block block ON block.task_id=task.id AND block.deleted_at IS NULL
             WHERE task.goal_id=? AND task.lifecycle_status<>'CANCELED' AND task.deleted_at IS NULL
+              AND (task.project_id IS NULL OR EXISTS (
+                    SELECT 1 FROM learning_project valid_project
+                    WHERE valid_project.id=task.project_id AND valid_project.deleted_at IS NULL
+                      AND valid_project.status NOT IN ('CANCELED','ARCHIVED')
+              ))
             """ + filter, goalId);
         BigDecimal total = new BigDecimal(value.get("total_minutes").toString()), done = new BigDecimal(value.get("done_minutes").toString());
         if (total.signum() == 0) {
@@ -437,9 +527,12 @@ public class GoalProjectService {
     }
 
     private void validateProjectActivation(LearningProjectEntity project, boolean impactConfirmed) {
-        Integer links = jdbc.queryForObject("SELECT COUNT(*) FROM goal_project WHERE project_id=?", Integer.class, project.getId());
+        Integer links = jdbc.queryForObject("""
+                SELECT COUNT(*) FROM goal_project gp JOIN learning_goal g ON g.id=gp.goal_id
+                WHERE gp.project_id=? AND g.status IN ('ACTIVE','PAUSED') AND g.deleted_at IS NULL
+                """, Integer.class, project.getId());
         if (links == null || links == 0)
-            throw new BusinessException(ErrorCode.COMMON_VALIDATION_ERROR, "项目激活前至少关联一个目标");
+            throw new BusinessException(ErrorCode.COMMON_VALIDATION_ERROR, "项目激活前至少关联一个正在推进的目标");
         BigDecimal total = jdbc.queryForObject("SELECT COALESCE(SUM(weight),0) FROM milestone WHERE project_id=? AND status<>'CANCELED' AND deleted_at IS NULL", BigDecimal.class, project.getId());
         if (total == null || total.compareTo(BigDecimal.ONE) != 0)
             throw new BusinessException(ErrorCode.COMMON_VALIDATION_ERROR, "非取消里程碑权重合计必须为 100%");
@@ -451,7 +544,13 @@ public class GoalProjectService {
 
     private void validateGoal(GoalInput i) {
         if (i.name() == null || i.name().trim().length() < 2 || i.name().length() > 100 || i.startDate() == null || i.dueDate() == null || i.dueDate().isBefore(i.startDate())
-            || i.weeklyBudgetMinutes() < 10 || i.weeklyBudgetMinutes() > 6720 || i.successCriteria() == null || i.successCriteria().isEmpty())
+            || i.weeklyBudgetMinutes() < 10 || i.weeklyBudgetMinutes() > 6720 || i.successCriteria() == null || i.successCriteria().isEmpty()
+            || i.type() == null || !Set.of("SKILL", "PROJECT", "EXAM").contains(i.type())
+            || i.priority() == null || !Set.of("LOW", "MEDIUM", "HIGH", "URGENT").contains(i.priority())
+            || i.description() != null && i.description().length() > 2000
+            || i.successCriteria().size() > 5 || i.successCriteria().stream().anyMatch(item ->
+                Objects.toString(item.get("description"), "").trim().length() < 2
+                        || Objects.toString(item.get("description"), "").length() > 500))
             throw new BusinessException(ErrorCode.COMMON_VALIDATION_ERROR, "目标名称、日期、预算或成功标准不合法");
         boolean catalog = i.directionId() != null;
         boolean custom = i.customDirection() != null && !i.customDirection().isBlank();
@@ -462,17 +561,29 @@ public class GoalProjectService {
     private void validateProject(ProjectInput i) {
         if (i.name() == null || i.name().isBlank() || i.name().length() > 120 || i.startDate() == null || i.dueDate() == null || i.dueDate().isBefore(i.startDate()))
             throw new BusinessException(ErrorCode.COMMON_VALIDATION_ERROR, "项目名称或日期不合法");
+        if (i.priority() == null || !Set.of("LOW", "MEDIUM", "HIGH", "URGENT").contains(i.priority())
+                || i.description() != null && i.description().length() > 2000) {
+            throw new BusinessException(ErrorCode.COMMON_VALIDATION_ERROR, "项目优先级或说明不合法");
+        }
         if (i.repositoryUrl() != null && !i.repositoryUrl().isBlank()) try {
             String scheme = URI.create(i.repositoryUrl()).getScheme();
             if (!Set.of("https", "http").contains(scheme)) throw new IllegalArgumentException();
         } catch (Exception e) {
             throw new BusinessException(ErrorCode.COMMON_VALIDATION_ERROR, "项目链接仅允许 HTTP/HTTPS");
         }
+        if (i.deliverables() != null && (i.deliverables().size() > 10 || i.deliverables().stream().anyMatch(item ->
+                Objects.toString(item.getOrDefault("name", item.get("description")), "").trim().isBlank()))) {
+            throw new BusinessException(ErrorCode.COMMON_VALIDATION_ERROR, "项目交付物不合法");
+        }
+        if (i.primaryDirectionId() != null) requireCatalogDirection(i.primaryDirectionId());
     }
 
     private void validateMilestone(LearningProjectEntity p, MilestoneInput i) {
-        if (i.name() == null || i.name().isBlank() || i.dueDate() == null || i.dueDate().isBefore(p.getStartDate()) || i.dueDate().isAfter(p.getDueDate())
-            || i.weight() == null || i.weight().signum() <= 0 || i.weight().compareTo(BigDecimal.ONE) > 0 || i.acceptanceCriteria() == null || i.acceptanceCriteria().isEmpty())
+        if (i.name() == null || i.name().isBlank() || i.name().length() > 120 || i.sequenceNo() < 1
+            || i.dueDate() == null || i.dueDate().isBefore(p.getStartDate()) || i.dueDate().isAfter(p.getDueDate())
+            || i.weight() == null || i.weight().signum() <= 0 || i.weight().compareTo(BigDecimal.ONE) > 0 || i.acceptanceCriteria() == null || i.acceptanceCriteria().isEmpty()
+            || i.acceptanceCriteria().size() > 10 || i.acceptanceCriteria().stream().anyMatch(item ->
+                Objects.toString(item.getOrDefault("description", item.get("name")), "").trim().isBlank()))
             throw new BusinessException(ErrorCode.COMMON_VALIDATION_ERROR, "里程碑名称、日期、权重或验收清单不合法");
     }
 
@@ -495,6 +606,18 @@ public class GoalProjectService {
         return e;
     }
 
+    private LearningProjectEntity ownedProjectForUpdate(String publicId) {
+        LearningProjectEntity e = projectMapper.lockByPublicId(publicId);
+        if (e == null || !Objects.equals(e.getUserId(), SecurityUtils.currentUserId())) notFound();
+        return e;
+    }
+
+    private LearningProjectEntity ownedProjectForUpdateById(long id) {
+        LearningProjectEntity e = projectMapper.lockById(id);
+        if (e == null || !Objects.equals(e.getUserId(), SecurityUtils.currentUserId())) notFound();
+        return e;
+    }
+
     private LearningProjectEntity ownedProjectById(long id) {
         LearningProjectEntity e = projectMapper.selectOne(new LambdaQueryWrapper<LearningProjectEntity>().eq(LearningProjectEntity::getId, id)
             .eq(LearningProjectEntity::getUserId, SecurityUtils.currentUserId()));
@@ -509,61 +632,38 @@ public class GoalProjectService {
         return m;
     }
 
-    private void requireProfileDirection(long id) {
-        long userId = SecurityUtils.currentUserId();
-        Integer n = jdbc.queryForObject("""
-                        SELECT COUNT(*) FROM user_profile_direction d
-                        JOIN user_profile p ON p.id=d.profile_id
-                        WHERE p.user_id=? AND d.direction_id=? AND d.status='ACTIVE' AND d.deleted_at IS NULL
-                        """,
-                Integer.class, userId, id);
-        if (n != null && n > 0) return;
-        CatalogDirection requested = catalogDirection(id);
-        List<Map<String, Object>> customDirections = jdbc.queryForList("""
-                        SELECT d.custom_direction FROM user_profile_direction d
-                        JOIN user_profile p ON p.id=d.profile_id
-                        WHERE p.user_id=? AND d.direction_id IS NULL AND d.custom_direction IS NOT NULL
-                          AND d.status='ACTIVE' AND d.deleted_at IS NULL
-                        """,
-                userId);
-        boolean mappedFromProfile = customDirections.stream()
-                .map(row -> Objects.toString(row.get("custom_direction"), ""))
-                .anyMatch(value -> directionMatches(value, requested));
-        if (!mappedFromProfile)
-            throw new BusinessException(ErrorCode.COMMON_VALIDATION_ERROR, "目标方向必须存在于当前画像，或能由画像自定义方向映射到学习目录");
+    private MilestoneEntity ownedMilestoneForUpdate(String publicId) {
+        MilestoneEntity milestone = milestoneMapper.lockByPublicId(publicId);
+        if (milestone == null) notFound();
+        ownedProjectById(milestone.getProjectId());
+        return milestone;
     }
 
-    private void requireGoalDirection(GoalInput input) {
-        String sourceType = input.sourceType() == null || input.sourceType().isBlank()
-                ? "CUSTOM" : input.sourceType();
-        if (input.directionId() == null) {
-            requireCustomDirection(input.customDirection(), "CUSTOM".equals(sourceType));
-        } else if ("CUSTOM".equals(sourceType)) {
-            requireCatalogDirection(input.directionId());
-        } else {
-            requireProfileDirection(input.directionId());
+    private void requireGoalDirection(GoalInput input,
+                                      GoalRecommendationBatchStore.VerifiedRecommendation recommendation) {
+        if (recommendation == null) {
+            if (input.directionId() == null) {
+                if (GoalRecommendationContext.normalize(input.customDirection()).isBlank()) {
+                    throw new BusinessException(ErrorCode.COMMON_VALIDATION_ERROR,
+                            "请选择目录方向或填写自定义学习方向");
+                }
+            } else requireCatalogDirection(input.directionId());
+            return;
         }
+        GoalRecommendationContext.Direction direction = recommendation.context()
+                .requireDirection(input.directionId(), input.customDirection());
+        if (direction.id() != null) requireCatalogDirection(direction.id());
     }
 
-    private void requireCustomDirection(String customDirection, boolean userDefinedGoal) {
-        String normalized = normalizeDirection(customDirection);
-        if (normalized.isBlank()) {
-            throw new BusinessException(ErrorCode.COMMON_VALIDATION_ERROR, "请选择目录方向或填写自定义学习方向");
-        }
-        if (userDefinedGoal) return;
-        long userId = SecurityUtils.currentUserId();
-        List<Map<String, Object>> rows = jdbc.queryForList("""
-                SELECT d.custom_direction FROM user_profile_direction d
-                JOIN user_profile p ON p.id=d.profile_id
-                WHERE p.user_id=? AND d.direction_id IS NULL AND d.custom_direction IS NOT NULL
-                  AND d.status='ACTIVE' AND d.deleted_at IS NULL
-                """, userId);
-        boolean present = rows.stream()
-                .map(row -> normalizeDirection(Objects.toString(row.get("custom_direction"), "")))
-                .anyMatch(normalized::equals);
-        if (!present) {
+    private void requireGoalDirectionForUpdate(LearningGoalEntity existing, GoalInput input) {
+        if (input.directionId() != null) requireCatalogDirection(input.directionId());
+        else if (GoalRecommendationContext.normalize(input.customDirection()).isBlank()) {
             throw new BusinessException(ErrorCode.COMMON_VALIDATION_ERROR,
-                    "推荐目标的自定义方向必须存在于当前画像");
+                    "请选择目录方向或填写自定义学习方向");
+        }
+        // 来源链路不可由更新请求改写；推荐目标编辑仍按正式字段规则重新校验。
+        if (input.sourceType() != null && !input.sourceType().equals(existing.getSourceType())) {
+            throw new BusinessException(ErrorCode.COMMON_VALIDATION_ERROR, "目标来源不可修改");
         }
     }
 
@@ -573,36 +673,6 @@ public class GoalProjectService {
                 Integer.class, id);
         if (n == null || n == 0)
             throw new BusinessException(ErrorCode.COMMON_VALIDATION_ERROR, "目标方向必须是有效学习目录");
-    }
-
-    private CatalogDirection catalogDirection(long id) {
-        try {
-            Map<String, Object> row = jdbc.queryForMap(
-                    "SELECT code, name FROM learning_direction WHERE id=? AND status='ACTIVE' AND deleted_at IS NULL",
-                    id);
-            return new CatalogDirection(id,
-                    Objects.toString(row.get("code"), ""),
-                    Objects.toString(row.get("name"), ""));
-        } catch (EmptyResultDataAccessException e) {
-            throw new BusinessException(ErrorCode.COMMON_VALIDATION_ERROR, "目标方向必须是有效学习目录");
-        }
-    }
-
-    private boolean directionMatches(String query, CatalogDirection target) {
-        String normalizedQuery = normalizeDirection(query);
-        if (normalizedQuery.isBlank()) return false;
-        return Stream.of(target.name(), target.code())
-                .map(this::normalizeDirection)
-                .filter(value -> !value.isBlank())
-                .anyMatch(value -> normalizedQuery.equals(value)
-                        || normalizedQuery.contains(value)
-                        || value.contains(normalizedQuery));
-    }
-
-    private String normalizeDirection(String value) {
-        if (value == null) return "";
-        return value.toLowerCase(Locale.ROOT)
-                .replaceAll("[\\s_\\-—/\\\\｜|·•：:，,。.、()（）\\[\\]【】]+", "");
     }
 
     private void apply(LearningGoalEntity e, GoalInput i) {
@@ -618,34 +688,39 @@ public class GoalProjectService {
         e.setSuccessCriteriaJson(json(i.successCriteria()));
     }
 
-    private void applySource(LearningGoalEntity goal, GoalInput input) {
-        String sourceType = input.sourceType() == null || input.sourceType().isBlank()
-                ? "CUSTOM" : input.sourceType();
+    private void applySource(LearningGoalEntity goal, GoalInput input,
+                             GoalRecommendationBatchStore.VerifiedRecommendation recommendation) {
+        String sourceType = sourceType(input);
         if (!Set.of("CUSTOM", "AI_RECOMMENDED", "RULE_RECOMMENDED").contains(sourceType)) {
             throw new BusinessException(ErrorCode.COMMON_VALIDATION_ERROR, "目标来源不合法");
         }
-        Integer profileVersionNo = null;
-        if (!"CUSTOM".equals(sourceType)) {
-            if (input.profileVersionId() == null) {
-                throw new BusinessException(ErrorCode.COMMON_VALIDATION_ERROR, "推荐目标缺少画像版本");
-            }
-            profileVersionNo = jdbc.query("""
-                    SELECT pv.version_no FROM profile_version pv
-                    JOIN user_profile p ON p.id=pv.profile_id
-                    WHERE pv.id=? AND p.user_id=?
-                    """, rs -> rs.next() ? rs.getInt(1) : null,
-                    input.profileVersionId(), SecurityUtils.currentUserId());
-            if (profileVersionNo == null) {
-                throw new BusinessException(ErrorCode.RESOURCE_NOT_FOUND, "推荐目标关联的画像版本不存在");
-            }
+        if ("CUSTOM".equals(sourceType) && (input.profileVersionId() != null
+                || input.recommendationId() != null && !input.recommendationId().isBlank())) {
+            throw new BusinessException(ErrorCode.COMMON_VALIDATION_ERROR, "自定义目标不能伪造推荐来源");
         }
         goal.setSourceType(sourceType);
-        goal.setProfileVersionId(input.profileVersionId());
-        goal.setRecommendationSnapshotJson("CUSTOM".equals(sourceType) ? null : json(Map.of(
-                "recommendationId", input.recommendationId() == null ? "" : input.recommendationId(),
-                "reason", input.recommendationReason() == null ? "" : input.recommendationReason(),
-                "profileVersionNo", profileVersionNo,
-                "confirmedAt", Instant.now())));
+        goal.setProfileVersionId(recommendation == null ? null : recommendation.profileVersionId());
+        if (recommendation == null) {
+            goal.setRecommendationSnapshotJson(null);
+        } else {
+            goal.setRecommendationSnapshotJson(json(Map.of(
+                    "recommendationId", recommendation.candidate().id(),
+                    "source", recommendation.candidate().source(),
+                    "profileVersionNo", recommendation.profileVersionNo(),
+                    "originalCandidate", recommendation.candidate(),
+                    "acceptedGoal", Map.of(
+                            "directionId", input.directionId() == null ? "" : String.valueOf(input.directionId()),
+                            "customDirection", Objects.toString(input.customDirection(), ""),
+                            "name", input.name(), "type", input.type(), "priority", Objects.toString(input.priority(), ""),
+                            "startDate", input.startDate(), "dueDate", input.dueDate(),
+                            "weeklyBudgetMinutes", input.weeklyBudgetMinutes(),
+                            "successCriteria", input.successCriteria()),
+                    "confirmedAt", Instant.now())));
+        }
+    }
+
+    private String sourceType(GoalInput input) {
+        return input.sourceType() == null || input.sourceType().isBlank() ? "CUSTOM" : input.sourceType();
     }
 
     private void apply(LearningProjectEntity e, ProjectInput i) {
@@ -678,8 +753,43 @@ public class GoalProjectService {
         return true;
     }
 
-    private boolean allChecklistConfirmed(Map<String, Object> e) {
-        return e != null && Boolean.TRUE.equals(e.get("allConfirmed"));
+    private Map<String, Object> verifiedMilestoneEvidence(MilestoneEntity milestone,
+                                                           MilestoneCompletionInput input) {
+        if (input == null || input.summary() == null || input.summary().isBlank()
+                || input.criteria() == null) {
+            throw new BusinessException(ErrorCode.COMMON_VALIDATION_ERROR, "必须逐项确认数据库中的里程碑验收条件");
+        }
+        JsonNode acceptance = readJson(milestone.getAcceptanceJson());
+        if (!acceptance.isArray() || acceptance.isEmpty() || input.criteria().size() != acceptance.size()) {
+            throw new BusinessException(ErrorCode.COMMON_VALIDATION_ERROR, "里程碑验收条件存在缺项");
+        }
+        Map<Integer, Map<String, Object>> submitted = new HashMap<>();
+        for (Map<String, Object> item : input.criteria()) {
+            Object rawIndex = item.get("index");
+            if (!(rawIndex instanceof Number number)
+                    || submitted.put(number.intValue(), item) != null) {
+                throw new BusinessException(ErrorCode.COMMON_VALIDATION_ERROR, "里程碑验收条件序号无效");
+            }
+        }
+        List<Map<String, Object>> verified = new ArrayList<>();
+        for (int index = 0; index < acceptance.size(); index++) {
+            Map<String, Object> confirmation = submitted.get(index);
+            if (confirmation == null || !Boolean.TRUE.equals(confirmation.get("confirmed"))) {
+                throw new BusinessException(ErrorCode.COMMON_VALIDATION_ERROR, "必须逐项确认数据库中的里程碑验收条件");
+            }
+            JsonNode required = acceptance.get(index);
+            Map<String, Object> item = new LinkedHashMap<>();
+            item.put("index", index);
+            item.put("description", required.path("description").asText(required.path("name").asText("验收条件")));
+            item.put("confirmed", true);
+            String evidence = Objects.toString(confirmation.get("evidence"), "").trim();
+            item.put("evidence", evidence.isBlank() ? input.summary().trim() : evidence);
+            verified.add(item);
+        }
+        if (submitted.size() != acceptance.size()) {
+            throw new BusinessException(ErrorCode.COMMON_VALIDATION_ERROR, "里程碑验收条件包含伪造项");
+        }
+        return Map.of("summary", input.summary().trim(), "criteria", verified, "acceptedAt", Instant.now());
     }
 
     private JsonNode readJson(String value) {
@@ -700,6 +810,10 @@ public class GoalProjectService {
 
     private void validateVersion(Integer current, Integer requested) {
         if (requested == null || !requested.equals(current)) conflict();
+    }
+
+    private void lockUser(long userId) {
+        if (userMapper.lockById(userId) == null) notFound();
     }
 
     private void conflict() {

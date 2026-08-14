@@ -2,233 +2,177 @@ package com.adaptivelearning.goalproject.application;
 
 import com.adaptivelearning.goalproject.domain.LearningGoalEntity;
 import com.adaptivelearning.goalproject.infrastructure.GoalProjectMappers.GoalMapper;
-import com.adaptivelearning.profile.domain.*;
-import com.adaptivelearning.profile.infrastructure.ProfileMappers.*;
+import com.adaptivelearning.profile.domain.ProfileVersionEntity;
+import com.adaptivelearning.profile.domain.UserProfileEntity;
+import com.adaptivelearning.profile.infrastructure.ProfileMappers.ProfileVersionMapper;
+import com.adaptivelearning.profile.infrastructure.ProfileMappers.UserProfileMapper;
 import com.adaptivelearning.shared.ai.AiModelException;
 import com.adaptivelearning.shared.ai.PythonAiServiceClient;
 import com.adaptivelearning.shared.exception.BusinessException;
 import com.adaptivelearning.shared.exception.ErrorCode;
 import com.adaptivelearning.shared.security.SecurityUtils;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
-import com.baomidou.mybatisplus.core.toolkit.IdWorker;
-import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.annotation.JsonSerialize;
+import com.fasterxml.jackson.databind.ser.std.ToStringSerializer;
 import lombok.RequiredArgsConstructor;
-import lombok.extern.slf4j.Slf4j;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
 
 import java.math.BigDecimal;
 import java.time.Instant;
 import java.time.LocalDate;
-import java.time.temporal.ChronoUnit;
-import java.util.*;
+import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+import java.util.Set;
 
-@Slf4j
 @Service
 @RequiredArgsConstructor
 public class GoalRecommendationService {
     private final UserProfileMapper profileMapper;
-    private final ProfileDirectionMapper directionMapper;
     private final ProfileVersionMapper versionMapper;
-    private final LearningPreferenceMapper preferenceMapper;
-    private final AvailabilityRuleMapper availabilityMapper;
     private final GoalMapper goalMapper;
     private final PythonAiServiceClient pythonAi;
     private final JdbcTemplate jdbc;
     private final ObjectMapper objectMapper;
+    private final GoalRecommendationBatchStore batchStore;
+    private final DeterministicGoalRecommendationPolicy policy = new DeterministicGoalRecommendationPolicy();
 
-    public record Recommendation(String id, Long directionId, String customDirection, String directionName, String name,
+    public record Recommendation(String id,
+                                 @JsonSerialize(using = ToStringSerializer.class) Long directionId,
+                                 String customDirection, String directionName, String currentStage, String name,
                                  String type, String description, String priority,
                                  LocalDate startDate, LocalDate dueDate, int weeklyBudgetMinutes,
                                  List<Map<String, Object>> successCriteria, String reason,
                                  List<String> milestones, String source) { }
+
     public record RecommendationResponse(String profileVersionId, int profileVersionNo,
                                          Instant generatedAt, String source,
-                                         List<Recommendation> recommendations) { }
+                                         List<Recommendation> recommendations,
+                                         String message) { }
 
     public RecommendationResponse recommend(int requestedCount) {
         long userId = SecurityUtils.currentUserId();
         int count = Math.max(1, Math.min(requestedCount, 3));
-        UserProfileEntity profile = profileMapper.selectOne(new LambdaQueryWrapper<UserProfileEntity>()
-                .eq(UserProfileEntity::getUserId, userId));
-        if (profile == null || !"GENERATED".equals(profile.getProfileStatus())
-                || profile.getCurrentVersionNo() == null || profile.getCurrentVersionNo() < 1) {
-            throw new BusinessException(ErrorCode.COMMON_VALIDATION_ERROR, "请先完成并确认学习画像，再生成推荐目标");
-        }
-        LocalDate start = LocalDate.now().isAfter(profile.getPlanStartDate())
-                ? LocalDate.now() : profile.getPlanStartDate();
-        if (profile.getPlanEndDate() == null || profile.getPlanEndDate().isBefore(start)) {
-            throw new BusinessException(ErrorCode.COMMON_VALIDATION_ERROR, "当前画像学习周期已结束，请先更新画像时间");
-        }
+        UserProfileEntity profile = currentGeneratedProfile(userId);
         ProfileVersionEntity version = versionMapper.selectOne(new LambdaQueryWrapper<ProfileVersionEntity>()
                 .eq(ProfileVersionEntity::getProfileId, profile.getId())
                 .eq(ProfileVersionEntity::getVersionNo, profile.getCurrentVersionNo()));
         if (version == null) {
-            throw new BusinessException(ErrorCode.RESOURCE_NOT_FOUND, "当前画像版本不存在，请重新生成画像");
+            throw new BusinessException(ErrorCode.RESOURCE_NOT_FOUND, "当前正式画像版本不存在，请重新生成画像");
         }
-        List<ProfileDirectionEntity> storedDirections = directionMapper.selectList(
-                new LambdaQueryWrapper<ProfileDirectionEntity>()
-                        .eq(ProfileDirectionEntity::getProfileId, profile.getId())
-                        .eq(ProfileDirectionEntity::getStatus, "ACTIVE")
-                        .orderByDesc(ProfileDirectionEntity::getIsPrimary));
-        List<DirectionContext> directions = storedDirections.stream()
-                .map(this::directionContext)
-                .flatMap(Optional::stream)
-                .toList();
-        if (directions.isEmpty())
-            throw new BusinessException(ErrorCode.COMMON_VALIDATION_ERROR, "当前画像没有可用学习方向，请先完善画像");
+        GoalRecommendationContext context = GoalRecommendationContext.from(
+                version.getId(), version.getVersionNo(), version.getSnapshotJson(), objectMapper);
+        validateCatalogDirections(context);
+        LocalDate today = LocalDate.now();
+        if (context.planEndDate().isBefore(today.isAfter(context.planStartDate()) ? today : context.planStartDate())) {
+            throw new BusinessException(ErrorCode.COMMON_VALIDATION_ERROR, "当前正式画像学习周期已结束，请先更新画像时间");
+        }
 
-        LearningPreferenceEntity preference = preferenceMapper.selectOne(
-                new LambdaQueryWrapper<LearningPreferenceEntity>().eq(LearningPreferenceEntity::getUserId, userId));
-        int availableMinutes = availabilityMapper.selectList(new LambdaQueryWrapper<AvailabilityRuleEntity>()
-                        .eq(AvailabilityRuleEntity::getUserId, userId)).stream()
-                .mapToInt(AvailabilityRuleEntity::getAvailableMinutes).sum();
-        BigDecimal capacityRatio = preference == null || preference.getCapacityRatio() == null
-                ? new BigDecimal("0.85") : preference.getCapacityRatio();
-        int weeklyCapacity = Math.max(10, BigDecimal.valueOf(Math.max(availableMinutes, 10))
-                .multiply(capacityRatio).intValue());
-        List<String> existingNames = goalMapper.selectList(new LambdaQueryWrapper<LearningGoalEntity>()
-                        .eq(LearningGoalEntity::getUserId, userId))
-                .stream().map(LearningGoalEntity::getName).filter(Objects::nonNull).toList();
+        List<LearningGoalEntity> activeGoals = goalMapper.selectList(new LambdaQueryWrapper<LearningGoalEntity>()
+                .eq(LearningGoalEntity::getUserId, userId)
+                .in(LearningGoalEntity::getStatus, "DRAFT", "ACTIVE", "PAUSED")).stream()
+                .filter(goal -> Set.of("DRAFT", "ACTIVE", "PAUSED").contains(goal.getStatus())).toList();
+        List<DeterministicGoalRecommendationPolicy.ActiveGoal> activeGoalKeys = activeGoals.stream()
+                .map(this::activeGoal).toList();
 
+        List<Recommendation> recommendations;
+        String source;
+        String message = null;
         if (!pythonAi.isConfigured()) {
-            throw new AiModelException(ErrorCode.SERVICE_TEMPORARILY_UNAVAILABLE);
+            throw new AiModelException(ErrorCode.MODEL_PROVIDER_ERROR, "AI 服务配置不完整", Map.of(), null);
         }
-        PythonAiServiceClient.GoalRecommendationResult result = pythonAi.goalRecommendations(
-                new PythonAiServiceClient.GoalRecommendationRequest(userId, LocalDate.now(), version.getId(),
-                        version.getVersionNo(), profile.getPlanStartDate(), profile.getPlanEndDate(),
-                        profile.getBackgroundText(), directions.stream().map(item ->
-                        new PythonAiServiceClient.GoalDirectionContext(item.id(), item.name(),
-                                item.currentStage(), item.primary())).toList(),
-                        preferenceContext(preference), weeklyCapacity, existingNames, count));
-        List<RecommendationSeed> seeds = result.recommendations().stream().map(item -> new RecommendationSeed(
-                item.directionId(), item.customDirection(), item.name(), item.type(), item.description(), item.priority(),
-                item.durationDays(), item.weeklyBudgetMinutes(), item.successCriteria(),
-                item.reason(), item.milestones())).toList();
-        String source = "AI";
+        try {
+            PythonAiServiceClient.GoalRecommendationResult ai = pythonAi.goalRecommendations(
+                    aiRequest(userId, version, context, activeGoals, count, today));
+            recommendations = policy.validateAi(context, ai.recommendations(), count, today);
+            source = "AI";
+        } catch (AiModelException error) {
+            if (!fallbackEligible(error)) throw error;
+            recommendations = policy.fallback(context, activeGoalKeys, count, today);
+            source = "RULE_FALLBACK";
+            message = recommendations.isEmpty()
+                    ? "当前画像中的方向均已有同阶段活动目标，因此没有生成重复候选。"
+                    : "AI 服务暂时不可用，已根据正式画像生成确定性规则候选。";
+        } catch (BusinessException error) {
+            if (error.getCode() != ErrorCode.MODEL_OUTPUT_INVALID) throw error;
+            recommendations = policy.fallback(context, activeGoalKeys, count, today);
+            source = "RULE_FALLBACK";
+            message = recommendations.isEmpty()
+                    ? "当前画像中的方向均已有同阶段活动目标，因此没有生成重复候选。"
+                    : "AI 候选未通过 Java 校验，已根据正式画像生成确定性规则候选。";
+        }
 
-        Map<Long, String> directionNames = new HashMap<>();
-        directions.stream().filter(item -> item.id() != null)
-                .forEach(item -> directionNames.put(item.id(), item.name()));
-        String recommendationSource = source;
-        long remainingDays = ChronoUnit.DAYS.between(start, profile.getPlanEndDate()) + 1;
-        List<Recommendation> recommendations = seeds.stream().limit(count).map(seed -> {
-            long duration = Math.max(1, Math.min(seed.durationDays(), remainingDays));
-            LocalDate dueDate = start.plusDays(duration - 1);
-            List<Map<String, Object>> criteria = seed.successCriteria().stream().limit(5)
-                    .map(text -> Map.<String, Object>of("type", "OUTCOME", "description", text,
-                            "completed", false)).toList();
-            String directionName = seed.directionId() == null
-                    ? seed.customDirection()
-                    : directionNames.getOrDefault(seed.directionId(), "当前学习方向");
-            return new Recommendation(UUID.randomUUID().toString(), seed.directionId(), seed.customDirection(),
-                    directionName, seed.name(),
-                    seed.type(), seed.description(), seed.priority(), start, dueDate,
-                    Math.max(10, Math.min(seed.weeklyBudgetMinutes(), weeklyCapacity)), criteria,
-                    seed.reason(), seed.milestones(), recommendationSource);
-        }).toList();
-        RecommendationResponse response = new RecommendationResponse(
-                String.valueOf(version.getId()), version.getVersionNo(), Instant.now(), source, recommendations);
-        saveBatch(userId, version, response);
+        RecommendationResponse response = new RecommendationResponse(String.valueOf(version.getId()),
+                version.getVersionNo(), Instant.now(), source, recommendations, message);
+        batchStore.save(userId, version, response);
         return response;
     }
 
     public RecommendationResponse latest() {
-        long userId = SecurityUtils.currentUserId();
-        List<String> payloads = jdbc.query("""
-                SELECT response_json
-                FROM goal_recommendation_batch
-                WHERE user_id=?
-                ORDER BY generated_at DESC,id DESC
-                LIMIT 1
-                """, (rs, row) -> rs.getString(1), userId);
-        if (payloads.isEmpty()) return null;
+        return batchStore.latest(SecurityUtils.currentUserId());
+    }
+
+    private UserProfileEntity currentGeneratedProfile(long userId) {
+        UserProfileEntity profile = profileMapper.selectOne(new LambdaQueryWrapper<UserProfileEntity>()
+                .eq(UserProfileEntity::getUserId, userId));
+        if (profile == null || !"GENERATED".equals(profile.getProfileStatus())
+                || profile.getCurrentVersionNo() == null || profile.getCurrentVersionNo() < 1) {
+            throw new BusinessException(ErrorCode.COMMON_VALIDATION_ERROR,
+                    "请先完成并确认学习画像，再生成推荐目标");
+        }
+        return profile;
+    }
+
+    private void validateCatalogDirections(GoalRecommendationContext context) {
+        for (GoalRecommendationContext.Direction direction : context.directions()) {
+            if (direction.id() == null) continue;
+            Integer count = jdbc.queryForObject("""
+                    SELECT COUNT(*) FROM learning_direction
+                    WHERE id=? AND status='ACTIVE' AND deleted_at IS NULL
+                    """, Integer.class, direction.id());
+            if (count == null || count == 0) {
+                throw new BusinessException(ErrorCode.COMMON_VALIDATION_ERROR,
+                        "正式画像中的公共学习方向已停用，请更新画像后重试");
+            }
+        }
+    }
+
+    private PythonAiServiceClient.GoalRecommendationRequest aiRequest(
+            long userId, ProfileVersionEntity version, GoalRecommendationContext context,
+            List<LearningGoalEntity> activeGoals, int count, LocalDate today) {
+        return new PythonAiServiceClient.GoalRecommendationRequest(userId, today, version.getId(),
+                version.getVersionNo(), context.planStartDate(), context.planEndDate(), context.backgroundText(),
+                context.directions().stream().map(item -> new PythonAiServiceClient.GoalDirectionContext(
+                        item.id(), item.name(), item.currentStage(), item.primary())).toList(),
+                context.preference(), Math.max(10, Math.min(context.weeklyCapacityMinutes(), 6720)),
+                activeGoals.stream().map(LearningGoalEntity::getName).filter(Objects::nonNull).toList(),
+                context.selfAssessmentCount(), context.confidence(), context.recommendedDifficulty(),
+                context.dailyRecommendedTasks(), context.riskNotices(), count);
+    }
+
+    private DeterministicGoalRecommendationPolicy.ActiveGoal activeGoal(LearningGoalEntity goal) {
+        String directionKey = goal.getDirectionId() == null
+                ? "custom:" + GoalRecommendationContext.normalize(goal.getCustomDirection())
+                : "catalog:" + goal.getDirectionId();
+        String currentStage = null;
         try {
-            return objectMapper.readValue(payloads.get(0), RecommendationResponse.class);
-        } catch (JsonProcessingException error) {
-            log.warn("无法读取用户 {} 的历史目标推荐", userId, error);
-            return null;
+            JsonNode snapshot = objectMapper.readTree(goal.getRecommendationSnapshotJson());
+            currentStage = snapshot.path("originalCandidate").path("currentStage").asText(null);
+        } catch (Exception ignored) {
+            // 旧数据没有候选阶段，按方向保守阻止重复推荐。
         }
+        return new DeterministicGoalRecommendationPolicy.ActiveGoal(directionKey, currentStage);
     }
 
-    private void saveBatch(long userId, ProfileVersionEntity version, RecommendationResponse response) {
-        try {
-            jdbc.update("""
-                    INSERT INTO goal_recommendation_batch(
-                      id,public_id,user_id,profile_version_id,profile_version_no,source,
-                      response_json,generated_at,created_at
-                    ) VALUES(?,?,?,?,?,?,?,?,?)
-                    """, IdWorker.getId(), UUID.randomUUID().toString(), userId, version.getId(),
-                    version.getVersionNo(), response.source(),
-                    objectMapper.writeValueAsString(response), response.generatedAt(), Instant.now());
-        } catch (JsonProcessingException error) {
-            throw new IllegalStateException("目标推荐结果序列化失败", error);
-        }
+    private boolean fallbackEligible(AiModelException error) {
+        if (Set.of(ErrorCode.SERVICE_TEMPORARILY_UNAVAILABLE, ErrorCode.MODEL_REQUEST_TIMEOUT,
+                ErrorCode.MODEL_QUOTA_EXCEEDED, ErrorCode.MODEL_OUTPUT_INVALID).contains(error.getCode())) return true;
+        if (error.getCode() != ErrorCode.MODEL_PROVIDER_ERROR) return false;
+        if ("AI_PROVIDER_ERROR".equals(error.getDetails().get("pythonCode"))) return true;
+        Object providerStatus = error.getDetails().get("providerStatus");
+        return providerStatus instanceof Number status && status.intValue() >= 500;
     }
-
-    private Map<String, Object> preferenceContext(LearningPreferenceEntity preference) {
-        if (preference == null) return Map.of();
-        Map<String, Object> result = new LinkedHashMap<>();
-        result.put("guidanceStyle", preference.getGuidanceStyle());
-        result.put("taskGranularity", preference.getTaskGranularity());
-        result.put("focusMinutes", preference.getFocusMinutes());
-        result.put("difficultyMin", preference.getDifficultyMin());
-        result.put("difficultyMax", preference.getDifficultyMax());
-        return result;
-    }
-
-    private String directionName(long directionId) {
-        String name = jdbc.query("SELECT name FROM learning_direction WHERE id=? AND status='ACTIVE'",
-                rs -> rs.next() ? rs.getString(1) : null, directionId);
-        if (name == null) throw new BusinessException(ErrorCode.RESOURCE_NOT_FOUND, "画像中的学习方向不存在");
-        return name;
-    }
-
-    private Optional<DirectionContext> directionContext(ProfileDirectionEntity item) {
-        if (item.getDirectionId() != null) {
-            return Optional.of(new DirectionContext(item.getDirectionId(), directionName(item.getDirectionId()),
-                    item.getCurrentStage(), Boolean.TRUE.equals(item.getIsPrimary())));
-        }
-        Optional<CatalogDirection> catalog = matchCatalogDirection(item.getCustomDirection());
-        if (catalog.isPresent()) {
-            CatalogDirection match = catalog.get();
-            return Optional.of(new DirectionContext(match.id(), match.name(), item.getCurrentStage(),
-                    Boolean.TRUE.equals(item.getIsPrimary())));
-        }
-        if (item.getCustomDirection() == null || item.getCustomDirection().isBlank()) return Optional.empty();
-        return Optional.of(new DirectionContext(null, item.getCustomDirection().trim(), item.getCurrentStage(),
-                Boolean.TRUE.equals(item.getIsPrimary())));
-    }
-
-    private Optional<CatalogDirection> matchCatalogDirection(String query) {
-        if (query == null || query.isBlank()) return Optional.empty();
-        String normalized = normalizeDirection(query);
-        List<Map<String, Object>> rows = jdbc.queryForList(
-                "SELECT id,code,name FROM learning_direction WHERE status='ACTIVE' AND deleted_at IS NULL ORDER BY sort_no,id");
-        Optional<CatalogDirection> exact = rows.stream()
-                .map(row -> new CatalogDirection(((Number) row.get("id")).longValue(),
-                        String.valueOf(row.get("code")), String.valueOf(row.get("name"))))
-                .filter(item -> normalizeDirection(item.name()).equals(normalized)
-                        || normalizeDirection(item.code()).equals(normalized))
-                .findFirst();
-        if (exact.isPresent()) return exact;
-        return rows.stream()
-                .map(row -> new CatalogDirection(((Number) row.get("id")).longValue(),
-                        String.valueOf(row.get("code")), String.valueOf(row.get("name"))))
-                .filter(item -> normalizeDirection(item.name()).contains(normalized)
-                        || normalized.contains(normalizeDirection(item.name())))
-                .findFirst();
-    }
-
-    private String normalizeDirection(String value) {
-        return value.toLowerCase(Locale.ROOT).replaceAll("[\\s_\\-·]+", "");
-    }
-
-    private record DirectionContext(Long id, String name, String currentStage, boolean primary) { }
-    private record CatalogDirection(long id, String code, String name) { }
-    private record RecommendationSeed(Long directionId, String customDirection, String name, String type, String description,
-                                      String priority, int durationDays, int weeklyBudgetMinutes,
-                                      List<String> successCriteria, String reason,
-                                      List<String> milestones) { }
 }

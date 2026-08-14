@@ -24,6 +24,6 @@ public class CatalogController {
 
     @GetMapping("/knowledge-points")
     public ApiResponse<List<Map<String, Object>>> knowledgePoints(@RequestParam(required = false) Long directionId) {
-        return ApiResponse.ok(service.knowledgePoints(directionId, null));
+        return ApiResponse.ok(service.catalogKnowledgePoints(directionId));
     }
 }

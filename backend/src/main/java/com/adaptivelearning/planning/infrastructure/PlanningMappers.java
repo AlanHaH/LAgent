@@ -8,8 +8,14 @@ import java.time.Instant;
 
 public final class PlanningMappers {
     private PlanningMappers() {}
-    @Mapper public interface PlanMapper extends BaseMapper<LearningPlanEntity> {}
-    @Mapper public interface PlanVersionMapper extends BaseMapper<PlanVersionEntity> {}
+    @Mapper public interface PlanMapper extends BaseMapper<LearningPlanEntity> {
+        @Select("SELECT * FROM learning_plan WHERE id=#{id} AND deleted_at IS NULL FOR UPDATE")
+        LearningPlanEntity lockById(@Param("id") long id);
+    }
+    @Mapper public interface PlanVersionMapper extends BaseMapper<PlanVersionEntity> {
+        @Select("SELECT * FROM plan_version WHERE id=#{id} AND deleted_at IS NULL FOR UPDATE")
+        PlanVersionEntity lockById(@Param("id") long id);
+    }
     @Mapper public interface PlanStageMapper extends BaseMapper<PlanStageEntity> {}
     @Mapper public interface PlanChangeMapper extends BaseMapper<PlanChangeItemEntity> {}
     @Mapper public interface PlanValidationMapper extends BaseMapper<PlanValidationResultEntity> {}
@@ -27,4 +33,3 @@ public final class PlanningMappers {
         int upsert(@Param("planId") long planId,@Param("versionId") long versionId,@Param("at") Instant at);
     }
 }
-

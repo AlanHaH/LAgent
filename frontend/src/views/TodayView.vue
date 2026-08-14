@@ -5,6 +5,7 @@ import dayjs from 'dayjs'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import MarkdownIt from 'markdown-it'
 import DOMPurify from 'dompurify'
+import type { AxiosError } from 'axios'
 import { isDark } from '../theme'
 import { use } from 'echarts/core'
 import { GraphChart } from 'echarts/charts'
@@ -44,6 +45,8 @@ type TaskGraphNode = {
   status: string
   availableToday: boolean
   temporalState: 'PAST' | 'TODAY' | 'FUTURE' | 'UNSCHEDULED'
+  blockedReason?: string
+  replanRequired: boolean
 }
 
 type TaskGraphView = {
@@ -51,6 +54,68 @@ type TaskGraphView = {
   timezone: string
   nodes: TaskGraphNode[]
   edges: Array<{ source: string; target: string }>
+}
+
+type TaskEntityView = {
+  publicId: string
+  goalId: string
+  projectId?: string
+  milestoneId?: string
+  originPlanVersionId?: string
+  learningBlockId?: string
+  title: string
+  description?: string
+  taskType: string
+  priority: string
+  estimatedMinutes: number
+  scheduledStart?: string
+  dueAt?: string
+  lifecycleStatus: 'NOT_STARTED' | 'IN_PROGRESS' | 'PAUSED' | 'BLOCKED' | 'COMPLETED' | 'CANCELED'
+  completedAt?: string
+  version: number
+}
+
+type AcceptanceView = {
+  snapshotHash: string
+  criteria: Array<{ index: number; text: string }>
+}
+
+type ParentContextView = { publicId: string; name: string; status: string }
+type CompletionSummaryView = {
+  learnedText: string
+  difficultyText?: string
+  qualityLevel?: number
+  confidenceLevel?: number
+  remainingQuestions?: string
+  revisionNo: number
+  createdAt: string
+}
+
+type TaskView = {
+  task: TaskEntityView
+  scheduleStatus: string
+  effectiveSeconds: number
+  prerequisites: Array<{ publicId: string; title: string; status: string }>
+  knowledgeSources: Array<{ chunkId: string; documentId: string; documentName: string; chunkNo: number; pageFrom?: number }>
+  learningBlock?: Record<string, unknown>
+  blockedReason?: string
+  replanRequired: boolean
+  availableToday: boolean
+  project?: ParentContextView
+  milestone?: ParentContextView
+  acceptance: AcceptanceView
+  completionSummary?: CompletionSummaryView
+}
+
+type ActiveSessionView = {
+  sessionId: string
+  taskId: string
+  taskTitle: string
+  status: 'RUNNING' | 'PAUSED'
+  startedAt: string
+  pausedAt?: string
+  effectiveSeconds: number
+  serverNow: string
 }
 
 const screen = ref<'graph' | 'detail'>('graph')
@@ -62,10 +127,11 @@ const graph = ref<TaskGraphView>({
   edges: [],
 })
 const date = ref(dayjs().format('YYYY-MM-DD'))
-const tasks = ref<any[]>([])
-const upcoming = ref<any[]>([])
-const selected = ref<any>()
-const session = ref<any>()
+const tasks = ref<TaskView[]>([])
+const upcoming = ref<TaskView[]>([])
+const selected = ref<TaskView>()
+const activeSessions = ref<ActiveSessionView[]>([])
+const session = ref<ActiveSessionView>()
 const elapsed = ref(0)
 const note = ref({ title: '学习笔记', markdown: '', version: undefined as number | undefined })
 const timer = ref<number>()
@@ -121,9 +187,27 @@ const blockSourcesLoading = ref(false)
 const rescheduleVisible = ref(false)
 const rescheduleSubmitting = ref(false)
 const rescheduleForm = ref({ scheduledStart:'', dueAt:'', reason:'' })
+const completionVisible = ref(false)
+const completionSubmitting = ref(false)
+const completionForm = ref({
+  learnedText: '',
+  confirmedIndexes: [] as number[],
+  qualityLevel: undefined as number | undefined,
+  confidenceLevel: undefined as number | undefined,
+})
 
-const entity = computed(() => selected.value?.task || {})
-const running = computed(() => Boolean(session.value) && session.value.status === 'RUNNING')
+const emptyTask: TaskEntityView = {
+  publicId: '',
+  goalId: '',
+  title: '',
+  taskType: '',
+  priority: '',
+  estimatedMinutes: 0,
+  lifecycleStatus: 'NOT_STARTED',
+  version: 0,
+}
+const entity = computed<TaskEntityView>(() => selected.value?.task || emptyTask)
+const running = computed(() => session.value?.status === 'RUNNING')
 const completedCount = computed(() => tasks.value.filter((row) => row.task.lifecycleStatus === 'COMPLETED').length)
 const plannedMinutes = computed(() => tasks.value.reduce((total, row) => total + Number(row.task.estimatedMinutes || 0), 0))
 const currentDateLabel = computed(() => dayjs(date.value).isSame(dayjs(), 'day') ? '今天' : dayjs(date.value).format('M 月 D 日'))
@@ -143,10 +227,9 @@ const allBlockQuestionsAnswered = computed(() => {
   const questions = learningBlock.value?.testQuestions || []
   return questions.length > 0 && questions.every((question: any) => Boolean(blockTestAnswers.value[question.id]))
 })
-const selectedAvailableToday = computed(() => Boolean(
-  selected.value && graph.value.today && dayjs(date.value).isSame(dayjs(graph.value.today), 'day'),
-))
+const selectedAvailableToday = computed(() => Boolean(selected.value?.availableToday))
 const selectedGraphNode = computed(() => graph.value.nodes.find((node) => node.publicId === entity.value.publicId))
+const blockedReasonText = computed(() => executionReason(selected.value?.blockedReason))
 const graphOption = computed(() => ({
   tooltip: {
     trigger: 'item',
@@ -164,7 +247,7 @@ const graphOption = computed(() => ({
         dateText,
         node.availableToday ? '今天可进入'
           : node.status === 'COMPLETED' ? '已完成 · 点击回顾学习内容'
-          : '未到执行日期，仅供预览',
+          : executionReason(node.blockedReason),
       ].join('<br/>')
     },
   },
@@ -183,7 +266,7 @@ const graphOption = computed(() => ({
       const isCompleted = node.status === 'COMPLETED'
       const isPast = node.temporalState === 'PAST'
       const dark = isDark.value
-      const openable = isToday || isCompleted // 今天可进入，或已完成可回顾
+      const openable = true // 所有任务均可打开解释状态，执行资格仍以后端为准
       return {
         id: node.publicId,
         name: node.title,
@@ -228,19 +311,14 @@ async function loadGraph() {
 }
 
 async function openGraphTask(node: TaskGraphNode) {
-  if (!node.availableToday && node.status !== 'COMPLETED') return
-  date.value = graph.value.today
-  await load()
+  date.value = node.scheduledStart ? dayjs(node.scheduledStart).format('YYYY-MM-DD') : graph.value.today
+  tasks.value = await api<TaskView[]>({ url: '/tasks', params: { date: date.value } })
   let target = tasks.value.find((row) => row.task.publicId === node.publicId)
-  if (!target && node.status === 'COMPLETED') {
-    // 已完成任务不在今天的执行清单，直接拉任务与知识块用于回顾
+  if (!target) {
     try {
-      const detail = await api<any>({ url: `/tasks/${node.publicId}` })
-      const block = await api<any>({ url: `/tasks/${node.publicId}/learning-block` })
-      // GET /tasks/{id} 返回 TaskView（任务实体在 .task 字段），与 /tasks 列表的 row 结构对齐
-      target = { task: detail.task, learningBlock: block }
+      target = await api<TaskView>({ url: `/tasks/${node.publicId}` })
     } catch {
-      ElMessage.warning('回顾任务加载失败，请刷新图谱')
+      ElMessage.warning('任务详情加载失败，请刷新图谱')
       await loadGraph()
       return
     }
@@ -265,10 +343,10 @@ async function backToGraph() {
 }
 
 async function load() {
-  tasks.value = await api<any[]>({ url: '/tasks', params: { date: date.value } })
+  tasks.value = await api<TaskView[]>({ url: '/tasks', params: { date: date.value } })
   upcoming.value = []
   if (!tasks.value.length) {
-    const all = await api<any[]>({ url: '/tasks' })
+    const all = await api<TaskView[]>({ url: '/tasks' })
     const end = dayjs(date.value).endOf('day')
     upcoming.value = all
       .filter((row) => row.task?.scheduledStart && dayjs(row.task.scheduledStart).isAfter(end) && !['COMPLETED', 'CANCELED'].includes(row.task.lifecycleStatus))
@@ -279,11 +357,33 @@ async function load() {
   if (!selected.value && tasks.value.length) await select(tasks.value.find((row) => row.task.lifecycleStatus !== 'COMPLETED') || tasks.value[0])
 }
 
-onMounted(loadGraph)
+async function initialize() {
+  await loadGraph()
+  try {
+    await loadActiveSessions()
+  } catch {
+    activeSessions.value = []
+    syncSelectedSession()
+    ElMessage.error('活动学习会话状态异常，已停止本地计时恢复，请刷新后重试')
+    return
+  }
+  const restored = activeSessions.value[0]
+  if (!restored) return
+  const detail = await api<TaskView>({ url: `/tasks/${restored.taskId}` })
+  date.value = detail.task.scheduledStart
+    ? dayjs(detail.task.scheduledStart).format('YYYY-MM-DD')
+    : graph.value.today
+  tasks.value = await api<TaskView[]>({ url: '/tasks', params: { date: date.value } })
+  await select(tasks.value.find((row) => row.task.publicId === restored.taskId) || detail)
+  screen.value = 'detail'
+}
+
+onMounted(initialize)
 onUnmounted(() => timer.value && clearInterval(timer.value))
 
-async function select(row: any) {
+async function select(row: TaskView) {
   selected.value = row
+  syncSelectedSession()
   note.value = { title: '学习笔记', markdown: '', version: undefined }
   chatMessages.value = []
   chatDraft.value = ''
@@ -478,27 +578,40 @@ function runClock() {
   timer.value = window.setInterval(() => elapsed.value++, 1000)
 }
 
+async function loadActiveSessions() {
+  activeSessions.value = await api<ActiveSessionView[]>({ url: '/study-sessions/active' })
+  syncSelectedSession()
+}
+
+function syncSelectedSession() {
+  if (timer.value) clearInterval(timer.value)
+  session.value = selected.value
+    ? activeSessions.value.find((item) => item.taskId === selected.value?.task.publicId)
+    : undefined
+  elapsed.value = Number(session.value?.effectiveSeconds || 0)
+  if (session.value?.status === 'RUNNING') runClock()
+}
+
 async function start() {
-  if (!selectedAvailableToday.value) return void ElMessage.warning('未来任务只能预览，请在排期当天开始')
-  session.value = await api<any>({ method: 'POST', url: `/tasks/${entity.value.publicId}/start`, data: { startTimer: true } })
-  elapsed.value = 0
-  runClock()
+  if (!selectedAvailableToday.value) return void ElMessage.warning(blockedReasonText.value)
+  await api({ method: 'POST', url: `/tasks/${entity.value.publicId}/start`, data: { startTimer: true } })
+  await loadActiveSessions()
   await load()
 }
 async function pause() {
-  await api({ method: 'POST', url: `/study-sessions/${session.value.publicId}/pause` })
-  session.value.status = 'PAUSED'
-  if (timer.value) clearInterval(timer.value)
+  if (!session.value) return
+  await api({ method: 'POST', url: `/study-sessions/${session.value.sessionId}/pause` })
+  await loadActiveSessions()
 }
 async function resume() {
-  await api({ method: 'POST', url: `/study-sessions/${session.value.publicId}/resume` })
-  session.value.status = 'RUNNING'
-  runClock()
+  if (!session.value) return
+  await api({ method: 'POST', url: `/study-sessions/${session.value.sessionId}/resume` })
+  await loadActiveSessions()
 }
 async function stop() {
-  await api({ method: 'POST', url: `/study-sessions/${session.value.publicId}/stop` })
-  session.value = undefined
-  if (timer.value) clearInterval(timer.value)
+  if (!session.value) return
+  await api({ method: 'POST', url: `/study-sessions/${session.value.sessionId}/stop` })
+  await loadActiveSessions()
   await load()
   ElMessage.success('这段专注时长已经记入学习记录')
 }
@@ -508,20 +621,51 @@ async function saveNote() {
   ElMessage.success('笔记已保存，并保留了历史版本')
 }
 async function complete() {
-  const summary = await ElMessageBox.prompt('用一句话记录这次完成了什么', '完成这一小步', {
-    inputValidator: (value) => Boolean(value) || '完成总结不能为空',
-    confirmButtonText: '确认完成',
-    cancelButtonText: '稍后再说',
-  }).then((result) => result.value).catch(() => null)
-  if (!summary) return
-  await api({
-    method: 'POST',
-    url: `/tasks/${entity.value.publicId}/completion`,
-    data: { summary: { learnedText: summary }, confirmed: true },
-  })
-  await load()
-  if (selected.value?.learningBlock) await loadLearningBlock(entity.value.publicId)
-  ElMessage.success(selected.value?.learningBlock ? '学习已记录，请完成块测验收当前知识块' : '任务已完成，做得好')
+  completionForm.value = { learnedText: '', confirmedIndexes: [], qualityLevel: undefined, confidenceLevel: undefined }
+  completionVisible.value = true
+}
+
+async function submitCompletion() {
+  const learnedText = completionForm.value.learnedText.trim()
+  if (!learnedText) return void ElMessage.warning('完成总结不能为空')
+  const acceptance = selected.value?.acceptance
+  if (acceptance?.criteria.length
+      && completionForm.value.confirmedIndexes.length !== acceptance.criteria.length) {
+    return void ElMessage.warning('请逐项确认全部任务验收条件')
+  }
+  completionSubmitting.value = true
+  try {
+    await api({
+      method: 'POST',
+      url: `/tasks/${entity.value.publicId}/completion`,
+      data: {
+        summary: {
+          learnedText,
+          qualityLevel: completionForm.value.qualityLevel,
+          confidenceLevel: completionForm.value.confidenceLevel,
+        },
+        acceptance: acceptance?.criteria.length ? {
+          snapshotHash: acceptance.snapshotHash,
+          confirmedIndexes: completionForm.value.confirmedIndexes,
+        } : undefined,
+        confirmed: true,
+      },
+    })
+    completionVisible.value = false
+    await Promise.all([loadActiveSessions(), loadGraph()])
+    await load()
+    if (selected.value?.learningBlock) await loadLearningBlock(entity.value.publicId)
+    ElMessage.success(selected.value?.learningBlock ? '学习已记录，请完成块测验收当前知识块' : '任务已完成，做得好')
+  } catch (error) {
+    const code = (error as AxiosError<{ error?: { code?: string } }>).response?.data?.error?.code
+    if (code === 'TASK_ACCEPTANCE_STALE') {
+      selected.value = await api<TaskView>({ url: `/tasks/${entity.value.publicId}` })
+      completionForm.value.confirmedIndexes = []
+      ElMessage.warning('验收条件已更新，请重新逐项确认')
+    }
+  } finally {
+    completionSubmitting.value = false
+  }
 }
 
 async function earlyEnd() {
@@ -534,14 +678,31 @@ async function earlyEnd() {
   if (note === null || note === undefined) return
   const reason = String(note).trim() ? `提前结束：${String(note).trim()}` : '提前结束'
   await api({ method: 'POST', url: `/tasks/${entity.value.publicId}/cancellation`, data: { confirmed: true, reason } })
-  session.value = undefined
-  if (timer.value) clearInterval(timer.value)
+  await loadActiveSessions()
   await load()
   ElMessage.success('已提前结束，实际时长与原因已记录')
 }
 
 function statusText(status: string) {
-  return ({ PLANNED: '待开始', NOT_STARTED: '待开始', IN_PROGRESS: '进行中', COMPLETED: '已完成', CANCELED: '已提前结束' } as Record<string, string>)[status] || status
+  return ({ DRAFT: '草稿', ACTIVE: '进行中', PLANNED: '待开始', NOT_STARTED: '待开始', IN_PROGRESS: '进行中', PAUSED: '已暂停',
+    BLOCKED: '被前置任务阻塞', COMPLETED: '已完成', CANCELED: '已提前结束' } as Record<string, string>)[status] || status
+}
+
+function scheduleStatusText(status?: string) {
+  return ({ UPCOMING: '按计划进行', DUE_SOON: '即将到期', OVERDUE: '已逾期',
+    ON_TIME_COMPLETED: '按时完成', LATE_COMPLETED: '逾期完成', CANCELED: '已取消',
+    UNSCHEDULED: '待排期' } as Record<string, string>)[status || ''] || status || '待确认'
+}
+
+function executionReason(code?: string) {
+  return ({ GOAL_NOT_ACTIVE: '目标未激活，暂时不能执行', PROJECT_NOT_ACTIVE: '所属项目未处于活动状态',
+    MILESTONE_NOT_EXECUTABLE: '所属里程碑已结束，不能继续执行',
+    PREREQUISITE_INCOMPLETE: '请先完成全部前置任务', PREDECESSOR_NOT_COMPLETED: '请先完成前置任务',
+    CANCELED_PREDECESSOR: '前置任务已取消，需要重新规划',
+    DEPENDENCY_DATA_INVALID: '任务依赖数据异常，请刷新或联系管理员',
+    TASK_NOT_EXECUTABLE_DATE: '尚未到计划执行日期', FUTURE_TASK: '尚未到计划执行日期',
+    TASK_RESCHEDULE_REQUIRED: '已错过计划窗口，需要先改期', RESCHEDULE_REQUIRED: '需要先通过计划模块改期',
+    TASK_STATE_INVALID: '当前任务状态不能执行此操作' } as Record<string, string>)[code || ''] || '当前任务暂不可执行'
 }
 </script>
 
@@ -720,7 +881,15 @@ function statusText(status: string) {
               <div><span>建议投入</span><b>{{ entity.estimatedMinutes }} 分钟（非最低要求）</b></div>
               <div v-if="learningBlock"><span>实际投入</span><b>{{ formatActualTime(learningBlock.effectiveSeconds) }}</b></div>
               <div><span>前置任务</span><b>{{ selected?.prerequisites?.length ? selected.prerequisites.map((item:any) => `${item.title}（${item.status}）`).join('、') : '无，可直接开始' }}</b></div>
-              <div><span>任务来源</span><b>{{ entity.source || '个人计划' }}</b></div>
+              <div><span>任务来源</span><b>{{ entity.originPlanVersionId ? '已发布的正式计划' : '历史独立任务' }}</b></div>
+              <div><span>排期状态</span><b>{{ scheduleStatusText(selected?.scheduleStatus) }}</b></div>
+              <div v-if="selected?.project"><span>所属项目</span><b>{{ selected.project.name }}（{{ statusText(selected.project.status) }}）</b></div>
+              <div v-if="selected?.milestone"><span>所属里程碑</span><b>{{ selected.milestone.name }}（{{ statusText(selected.milestone.status) }}）</b></div>
+              <div v-if="selected?.blockedReason"><span>执行资格</span><b>{{ blockedReasonText }}</b></div>
+              <div v-if="selected?.acceptance.criteria.length" class="acceptance-clue">
+                <span>验收条件</span>
+                <b v-for="criterion in selected.acceptance.criteria" :key="criterion.index">{{ criterion.index + 1 }}. {{ criterion.text }}</b>
+              </div>
               <div v-if="selected?.knowledgeSources?.length" class="source-clue">
                 <span>计划指定资料</span>
                 <b v-for="source in selected.knowledgeSources" :key="source.chunkId">
@@ -750,6 +919,11 @@ function statusText(status: string) {
               <span class="focus-type">{{ entity.taskType || 'FOCUS SESSION' }}</span>
               <h2>{{ entity.title }}</h2>
               <p>{{ entity.description || '把注意力放在这一件事上。' }}</p>
+              <div class="task-context-line">
+                <span>{{ scheduleStatusText(selected.scheduleStatus) }}</span>
+                <span v-if="selected.project">项目：{{ selected.project.name }}</span>
+                <span v-if="selected.milestone">里程碑：{{ selected.milestone.name }}</span>
+              </div>
             </div>
             <el-button v-if="!['COMPLETED','CANCELED'].includes(entity.lifecycleStatus)" plain @click="openReschedule">提出改期</el-button>
           </div>
@@ -766,7 +940,7 @@ function statusText(status: string) {
             <template v-if="entity.lifecycleStatus !== 'COMPLETED' && entity.lifecycleStatus !== 'CANCELED'">
               <button class="early-end-action" :disabled="!selectedAvailableToday" @click="earlyEnd">提前结束</button>
               <button class="complete-action" :disabled="!selectedAvailableToday || (Boolean(learningBlock) && !blockGenerated)"
-                :title="learningBlock && !blockGenerated ? '请先生成当前知识块资料、练习和块测' : ''" @click="complete">
+                :title="learningBlock && !blockGenerated ? '请先生成当前知识块资料、练习和块测' : (!selectedAvailableToday ? blockedReasonText : '')" @click="complete">
                 <span>✓</span>{{ learningBlock && !blockGenerated ? '先生成知识块' : '完成学习，进入块测' }}
               </button>
             </template>
@@ -781,12 +955,30 @@ function statusText(status: string) {
             <span v-else class="ended-state">已提前结束</span>
           </div>
 
+          <section v-if="!selectedAvailableToday && !['COMPLETED','CANCELED'].includes(entity.lifecycleStatus)" class="execution-blocked" :class="{ 'needs-replan': selected.replanRequired }">
+            <b>{{ selected.replanRequired ? '这项任务需要重新规划' : '这项任务当前不可执行' }}</b>
+            <p>{{ blockedReasonText }}</p>
+            <el-button v-if="selected.replanRequired" plain @click="router.push(`/plans/${selectedGraphNode?.goalId || ''}`)">前往计划页处理</el-button>
+          </section>
+
+          <section v-if="selected.acceptance.criteria.length" class="acceptance-preview">
+            <div><span class="eyebrow">ACCEPTANCE</span><b>完成时需要逐项确认</b></div>
+            <ol><li v-for="criterion in selected.acceptance.criteria" :key="criterion.index">{{ criterion.text }}</li></ol>
+          </section>
+
+          <section v-if="selected.completionSummary" class="completion-summary">
+            <div><span class="eyebrow">COMPLETION SUMMARY</span><b>第 {{ selected.completionSummary.revisionNo }} 版完成总结</b></div>
+            <p>{{ selected.completionSummary.learnedText }}</p>
+            <small v-if="selected.completionSummary.qualityLevel">完成质量 {{ selected.completionSummary.qualityLevel }}/5</small>
+            <small v-if="selected.completionSummary.confidenceLevel">掌握信心 {{ selected.completionSummary.confidenceLevel }}/5</small>
+          </section>
+
           <section v-if="!session && entity.lifecycleStatus !== 'CANCELED' && entity.lifecycleStatus !== 'COMPLETED'" class="focus-console">
             <div class="focus-dial">
               <div><span>{{ formatTime }}</span><small>准备好再开始</small></div>
             </div>
             <div class="focus-controls">
-              <el-button type="primary" size="large" :disabled="!selectedAvailableToday" @click="start">{{ selectedAvailableToday ? '开始专注' : '仅可预览' }}</el-button>
+              <el-button type="primary" size="large" :disabled="!selectedAvailableToday" :title="selectedAvailableToday ? '' : blockedReasonText" @click="start">{{ selectedAvailableToday ? '开始专注' : '仅可预览' }}</el-button>
             </div>
             <div class="focus-meta"><span>建议投入 {{ entity.estimatedMinutes }} 分钟，不要求学满</span><i /><span>{{ entity.priority || 'MEDIUM' }} PRIORITY</span></div>
           </section>
@@ -929,6 +1121,36 @@ function statusText(status: string) {
         <el-form-item label="改期原因"><el-input v-model="rescheduleForm.reason" type="textarea" :rows="3" maxlength="1000" show-word-limit/></el-form-item>
       </el-form>
       <template #footer><el-button @click="rescheduleVisible=false">取消</el-button><el-button type="primary" :loading="rescheduleSubmitting" @click="proposeReschedule">生成待确认提案</el-button></template>
+    </el-dialog>
+    <el-dialog v-model="completionVisible" title="确认完成任务" width="560px" :close-on-click-modal="!completionSubmitting">
+      <el-form label-position="top">
+        <el-form-item label="本次学到了什么（必填）">
+          <el-input v-model="completionForm.learnedText" type="textarea" :rows="5" maxlength="3000" show-word-limit placeholder="用自己的话总结本次学习成果" />
+        </el-form-item>
+        <el-form-item v-if="selected?.acceptance.criteria.length" label="逐项确认验收条件">
+          <el-checkbox-group v-model="completionForm.confirmedIndexes" class="acceptance-checks">
+            <el-checkbox v-for="criterion in selected.acceptance.criteria" :key="criterion.index" :value="criterion.index">
+              {{ criterion.index + 1 }}. {{ criterion.text }}
+            </el-checkbox>
+          </el-checkbox-group>
+        </el-form-item>
+        <div class="completion-ratings">
+          <el-form-item label="完成质量（可选）">
+            <el-select v-model="completionForm.qualityLevel" clearable placeholder="1-5">
+              <el-option v-for="level in 5" :key="level" :label="`${level} / 5`" :value="level" />
+            </el-select>
+          </el-form-item>
+          <el-form-item label="掌握信心（可选）">
+            <el-select v-model="completionForm.confidenceLevel" clearable placeholder="1-5">
+              <el-option v-for="level in 5" :key="level" :label="`${level} / 5`" :value="level" />
+            </el-select>
+          </el-form-item>
+        </div>
+      </el-form>
+      <template #footer>
+        <el-button :disabled="completionSubmitting" @click="completionVisible=false">取消</el-button>
+        <el-button type="primary" :loading="completionSubmitting" @click="submitCompletion">确认完成</el-button>
+      </template>
     </el-dialog>
   </div>
 </template>
@@ -1199,8 +1421,25 @@ html.dark .test-question.review { background: rgba(255, 255, 255, .04); }
 .task-clues span, .task-clues b { display: block; }
 .task-clues span { color: var(--muted); font-size: 8px; }
 .task-clues b { margin-top: 6px; font-size: 10px; font-weight: 600; }
-.task-clues .source-clue { grid-column: 1 / -1; }
+.task-clues .source-clue, .task-clues .acceptance-clue { grid-column: 1 / -1; }
 .source-clue b { display: inline-block; margin: 7px 7px 0 0; padding: 6px 9px; border-radius: 99px; color: var(--green); background: rgba(255, 255, 255, .72); }
+.acceptance-clue b { padding-left: 11px; border-left: 2px solid rgba(31, 88, 64, .2); line-height: 1.6; }
+.task-context-line { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 11px; }
+.task-context-line span { padding: 5px 9px; border-radius: 99px; color: var(--green); background: var(--chip); font-size: 8px; font-weight: 700; }
+.execution-blocked, .acceptance-preview, .completion-summary { margin: 0 30px; padding: 16px 18px; border-radius: 16px; }
+.execution-blocked { border: 1px solid rgba(176, 137, 62, .24); background: var(--seal); }
+.execution-blocked.needs-replan { border-color: rgba(155, 78, 71, .22); }
+.execution-blocked b { font: 500 16px var(--display); }
+.execution-blocked p { margin: 6px 0 10px; color: var(--muted); font-size: 10px; line-height: 1.6; }
+.acceptance-preview, .completion-summary { display: grid; grid-template-columns: minmax(150px, .35fr) 1fr; gap: 18px; border: 1px solid rgba(31, 88, 64, .1); background: var(--paper); }
+.acceptance-preview > div > b, .completion-summary > div > b { display: block; margin-top: 5px; font: 500 15px var(--display); }
+.acceptance-preview ol { display: grid; gap: 6px; margin: 0; padding-left: 20px; font-size: 10px; line-height: 1.6; }
+.completion-summary p { margin: 0; font-size: 10px; line-height: 1.75; white-space: pre-wrap; }
+.completion-summary small { color: var(--muted); font-size: 8px; }
+.acceptance-checks { display: grid; gap: 10px; width: 100%; }
+.acceptance-checks :deep(.el-checkbox) { height: auto; margin-right: 0; white-space: normal; }
+.acceptance-checks :deep(.el-checkbox__label) { line-height: 1.6; }
+.completion-ratings { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
 @keyframes focus-pulse { 50% { box-shadow: 0 0 0 17px rgba(230, 194, 116, .045), 0 0 0 34px rgba(255, 255, 255, .012), inset 0 0 50px rgba(6, 23, 17, .18); } }
 
 @media (max-width: 1000px) {
@@ -1259,6 +1498,8 @@ html.dark .test-question.review { background: rgba(255, 255, 255, .04); }
   .chat-msg { max-width: 94%; }
   .workspace-notebook { padding: 0 10px 18px; }
   .task-clues { grid-template-columns: 1fr; }
+  .execution-blocked, .acceptance-preview, .completion-summary { margin: 0 16px; }
+  .acceptance-preview, .completion-summary, .completion-ratings { grid-template-columns: 1fr; }
 }
 
 /* 黑夜模式：scoped 覆盖（无法用 token 表达的暗色规则） */

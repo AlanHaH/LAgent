@@ -65,7 +65,7 @@ public class AnalyticsService {
         return jdbc.query("""
             SELECT km.knowledge_point_id,kp.name,km.score,km.confidence,km.level,km.evidence_count,km.calculated_at
             FROM knowledge_mastery km JOIN knowledge_point kp ON kp.id=km.knowledge_point_id WHERE km.user_id=? ORDER BY kp.name
-            """, (rs, row) -> Map.of("knowledgePointId", rs.getLong(1), "name", rs.getString(2), "score", rs.getBigDecimal(3), "confidence", rs.getBigDecimal(4), "level", rs.getString(5), "evidenceCount", rs.getInt(6), "calculatedAt", rs.getTimestamp(7).toInstant()), SecurityUtils.currentUserId());
+            """, (rs, row) -> Map.of("knowledgePointId", String.valueOf(rs.getLong(1)), "name", rs.getString(2), "score", rs.getBigDecimal(3), "confidence", rs.getBigDecimal(4), "level", rs.getString(5), "evidenceCount", rs.getInt(6), "calculatedAt", rs.getTimestamp(7).toInstant()), SecurityUtils.currentUserId());
     }
 
     public List<Map<String, Object>> masteryTrend() {

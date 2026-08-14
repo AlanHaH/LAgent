@@ -36,10 +36,12 @@ public final class PlanValidationPolicy {
         }
         return issues;
     }
-    /** 计划依赖的目标字段指纹：名称、起止日期、方向。状态切换等不影响计划的变更不改变指纹。 */
+    /** 计划依赖的目标业务字段指纹；状态由独立状态守卫处理。 */
     public static String goalFingerprint(LearningGoalEntity goal){
         String payload=String.join("|",n(goal.getName()),String.valueOf(goal.getStartDate()),String.valueOf(goal.getDueDate()),
-                String.valueOf(goal.getDirectionId()),n(goal.getCustomDirection()));
+                String.valueOf(goal.getDirectionId()),n(goal.getCustomDirection()),n(goal.getDescription()),
+                n(goal.getType()),n(goal.getPriority()),String.valueOf(goal.getWeeklyBudgetMinutes()),
+                n(goal.getSuccessCriteriaJson()),String.valueOf(goal.getProfileVersionId()));
         try{
             MessageDigest digest=MessageDigest.getInstance("SHA-256");
             return HexFormat.of().formatHex(digest.digest(payload.getBytes(StandardCharsets.UTF_8)));

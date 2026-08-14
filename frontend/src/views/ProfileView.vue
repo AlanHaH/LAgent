@@ -9,7 +9,7 @@ type Slot = { weekday:number; start:string; end:string; energyLevel:string }
 type WeekdayOption = { value:number; label:string }
 type Preference = { contentModes:string[]; guidanceStyle:string; taskGranularity:string; focusMinutes:number; capacityRatio:number; difficultyMin:number; difficultyMax:number; reminders:Record<string,boolean> }
 type Draft = {
-  timezone:string; weekStart:number; planStartDate?:string; planEndDate?:string; directionId?:number|string;
+  timezone:string; weekStart:number; planStartDate?:string; planEndDate?:string; directionId?:string;
   directionName?:string; customDirection?:string; sourceType?:'CATALOG'|'CUSTOM';
   knowledgeBaseDirection?:boolean; currentStage?:string; backgroundText?:string;
   preference:Preference; availability:Slot[]; evidence:Record<string,string>
@@ -17,8 +17,9 @@ type Draft = {
 type InterviewMessage = { id:string; role:string; content:string; source:string; createdAt:string }
 type InterviewSession = { id:string; status:string; draft:Draft; missingFields:string[]; completenessPercent:number; readyToConfirm:boolean; assistantMode:string; version:number; messages:InterviewMessage[] }
 type ProfileVersionView = {
-  id?:number|string; versionNo:number; snapshotJson?:string; confidence:number; triggerType?:string; createdAt?:string; snapshot:Record<string,any>
+  id?:string; versionNo:number; snapshotJson?:string; confidence:number; triggerType?:string; createdAt?:string; snapshot:Record<string,any>
 }
+type ProfileGenerationJob = { id?:string; publicId:string; userId?:string; status:string; profileVersionId?:string; errorCode?:string }
 
 const directions = ref<any[]>([])
 const router = useRouter()
@@ -27,6 +28,7 @@ const starting = ref(true)
 const sending = ref(false)
 const confirming = ref(false)
 const manualSaving = ref(false)
+const regenerating = ref(false)
 const manualOpen = ref(false)
 const chatInput = ref('')
 const chatBox = ref<HTMLElement>()
@@ -34,6 +36,7 @@ const pendingUserMessage = ref('')
 const streamingAssistant = ref('')
 let streamController:AbortController|undefined
 const profileVersion = ref<number>()
+const profileStatus = ref<string>()
 const preferenceVersion = ref<number>()
 const profileVersions = ref<ProfileVersionView[]>([])
 const versionHistoryVisible = ref(false)
@@ -41,13 +44,13 @@ const availabilityExceptions = ref<any[]>([])
 const knowledgePoints = ref<any[]>([])
 const selfAssessments = ref<any[]>([])
 const exceptionForm = reactive({ date:dayjs().add(1,'day').format('YYYY-MM-DD'), availableMinutes:0, reason:'' })
-const selfAssessmentForm = reactive({ knowledgePointId:undefined as number|undefined, level:2, lastStudiedAt:dayjs().format('YYYY-MM-DD'), note:'' })
+const selfAssessmentForm = reactive({ knowledgePointId:undefined as string|undefined, level:2, lastStudiedAt:dayjs().format('YYYY-MM-DD'), note:'' })
 
 const today = dayjs().format('YYYY-MM-DD')
 const profile = reactive({
   timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'Asia/Shanghai', weekStart: 1,
   planDates: [today, dayjs().add(27, 'day').format('YYYY-MM-DD')] as string[], backgroundText: '',
-  directionId: undefined as number|string|undefined, customDirection: '', currentStage: 'BEGINNER',
+  directionId: undefined as string|undefined, customDirection: '', currentStage: 'BEGINNER',
 })
 const pref = reactive<Preference>({ contentModes:['TEXT','PRACTICE'], guidanceStyle:'SOCRATIC', taskGranularity:'MEDIUM', focusMinutes:45, capacityRatio:.85, difficultyMin:1, difficultyMax:4, reminders:{ TASK_DUE:true, TASK_OVERDUE:true } })
 const slots = ref<Slot[]>([
@@ -121,6 +124,7 @@ function applyCurrentProfile(current:any) {
     directionId:primary?.directionId, customDirection:primary?.customDirection||'', currentStage:primary?.currentStage||'BEGINNER',
   })
   profileVersion.value = current.version
+  profileStatus.value = current.status
   if (current.preference) {
     Object.assign(pref,current.preference)
     pref.contentModes = sanitizeContentModes(current.preference.contentModes)
@@ -198,13 +202,13 @@ async function confirmDraft() {
     await loadAvailability(true)
     session.value = { ...session.value, status:'CONFIRMED', readyToConfirm:false, completenessPercent:100 }
     await waitProfileGeneration(result.generationJob)
-    await loadGenerated()
+    await Promise.all([loadGenerated(), refreshCurrentProfile()])
     ElMessage.success('学习画像已确认保存，并生成了可追溯版本')
     showProfileNextStepGuide()
   } finally { confirming.value = false }
 }
 
-async function waitProfileGeneration(job:any) {
+async function waitProfileGeneration(job:ProfileGenerationJob) {
   if (!job?.publicId) return
   let current = job
   for (let attempt = 0; ['QUEUED','RUNNING'].includes(current.status) && attempt < 90; attempt++) {
@@ -266,7 +270,7 @@ async function saveManual() {
     session.value=result.interview
     await loadAvailability(true)
     await waitProfileGeneration(result.generationJob)
-    await loadGenerated()
+    await Promise.all([loadGenerated(), refreshCurrentProfile()])
     manualOpen.value=false
     ElMessage.success(`手动画像已保存为 ${manualPeriodDays.value} 天周期，右侧草稿已同步`)
     showProfileNextStepGuide()
@@ -321,9 +325,14 @@ async function loadAvailability(replaceWhenEmpty:boolean) {
 }
 
 async function loadKnowledgePoints() {
+  if (!profile.directionId) {
+    knowledgePoints.value = []
+    selfAssessmentForm.knowledgePointId = undefined
+    return
+  }
   knowledgePoints.value = await api<any[]>({ url:'/knowledge-points', params:{ directionId:profile.directionId || undefined } })
-  if (!knowledgePoints.value.some(item => Number(item.id) === selfAssessmentForm.knowledgePointId)) {
-    selfAssessmentForm.knowledgePointId = knowledgePoints.value[0]?.id ? Number(knowledgePoints.value[0].id) : undefined
+  if (!knowledgePoints.value.some(item => String(item.id) === selfAssessmentForm.knowledgePointId)) {
+    selfAssessmentForm.knowledgePointId = knowledgePoints.value[0]?.id ? String(knowledgePoints.value[0].id) : undefined
   }
 }
 
@@ -334,16 +343,31 @@ async function loadSelfAssessments() {
 async function saveAvailabilityException() {
   await api({ method:'PUT', url:`/profiles/me/availability-exceptions/${exceptionForm.date}`,
     data:{ availableMinutes:exceptionForm.availableMinutes, reason:exceptionForm.reason } })
-  await loadAvailability(false)
-  ElMessage.success('日期例外已保存，后续计划会按当天容量排程')
+  await Promise.all([loadAvailability(false), refreshCurrentProfile()])
+  ElMessage.success('日期例外已保存；画像已标记为需要重新生成')
 }
 
 async function addSelfAssessment() {
   if (!selfAssessmentForm.knowledgePointId) return ElMessage.warning('请先选择知识点')
   await api({ method:'POST', url:'/profiles/me/self-assessments', data:selfAssessmentForm })
   selfAssessmentForm.note=''
-  await loadSelfAssessments()
+  await Promise.all([loadSelfAssessments(), refreshCurrentProfile()])
   ElMessage.success('自评证据已记录；重新生成画像后会纳入分析')
+}
+
+async function refreshCurrentProfile() {
+  const current = await api<any>({ url:'/profiles/me' })
+  if (current) applyCurrentProfile(current)
+}
+
+async function regenerateProfile() {
+  regenerating.value = true
+  try {
+    const job = await api<ProfileGenerationJob>({ method:'POST', url:'/profiles/me/generation-jobs' })
+    await waitProfileGeneration(job)
+    await Promise.all([refreshCurrentProfile(), loadGenerated()])
+    ElMessage.success('画像已根据最新资料重新生成')
+  } finally { regenerating.value = false }
 }
 
 async function scrollToBottom() { await nextTick(); chatBox.value?.scrollTo({ top:chatBox.value.scrollHeight, behavior:'smooth' }) }
@@ -415,6 +439,11 @@ function sanitizeContentModes(modes?:string[]) { const selected = validContentMo
       <div><span class="eyebrow">AI PROFILE INTERVIEW</span><h2>聊一聊，让画像自己成形</h2><p>AI 只整理草稿，不会自行修改正式数据；你检查并确认后才会保存。</p></div>
       <div class="head-actions"><el-button :disabled="sending" @click="manualOpen=true">高级手动编辑</el-button><el-button text :disabled="sending" @click="restartInterview">重新访谈</el-button></div>
     </div>
+
+    <el-alert v-if="profileStatus==='DRAFT' && profileVersion !== undefined" type="warning" show-icon :closable="false" class="profile-regeneration-alert">
+      <template #title>画像资料已经更新，需要重新生成正式画像版本</template>
+      <el-button type="primary" :loading="regenerating" :disabled="confirming || manualSaving" @click="regenerateProfile">重新生成画像</el-button>
+    </el-alert>
 
     <el-skeleton v-if="starting" :rows="8" animated class="panel"/>
     <template v-else-if="session">
@@ -539,7 +568,8 @@ function sanitizeContentModes(modes?:string[]) { const selected = validContentMo
         <article class="panel evidence-editor">
           <div class="panel-title"><div><h3>知识点自评</h3><p>自评作为低权重证据，不能替代测验，但能让初始计划更贴近你的基础。</p></div></div>
           <div class="evidence-form assessment-form">
-            <el-select v-model="selfAssessmentForm.knowledgePointId" filterable placeholder="选择知识点" :fallback-placements="['bottom', 'top']"><el-option v-for="item in knowledgePoints" :key="item.id" :value="Number(item.id)" :label="item.name"/></el-select>
+            <el-select v-if="profile.directionId" v-model="selfAssessmentForm.knowledgePointId" filterable placeholder="选择知识点" :fallback-placements="['bottom', 'top']"><el-option v-for="item in knowledgePoints" :key="item.id" :value="String(item.id)" :label="item.name"/></el-select>
+            <span v-else class="muted">自定义方向不关联公共知识点，请先选择公共目录方向后记录自评。</span>
             <el-rate v-model="selfAssessmentForm.level" :max="5"/>
             <el-date-picker v-model="selfAssessmentForm.lastStudiedAt" value-format="YYYY-MM-DD" :clearable="false" :fallback-placements="['bottom', 'top']"/>
             <el-input v-model="selfAssessmentForm.note" maxlength="1000" placeholder="补充说明（可选）"/>
@@ -575,6 +605,9 @@ function sanitizeContentModes(modes?:string[]) { const selected = validContentMo
 </template>
 
 <style scoped>
+.profile-regeneration-alert{margin-bottom:18px}
+.profile-regeneration-alert :deep(.el-alert__content){width:100%}
+.profile-regeneration-alert :deep(.el-alert__title){display:flex;align-items:center;justify-content:space-between;gap:16px;width:100%}
 .profile-wrap{max-width:1240px;margin:auto}.head-actions{display:flex;align-items:center;gap:8px}.interview-layout{display:grid;grid-template-columns:minmax(0,1.45fr) minmax(330px,.75fr);gap:18px;align-items:start}.chat-panel{padding:0;overflow:hidden}.chat-head{display:flex;align-items:center;justify-content:space-between;padding:18px 22px;border-bottom:1px solid var(--line);background:rgba(255,255,255,.38)}.chat-head>div{display:flex;align-items:center;gap:11px}.chat-head b,.chat-head small{display:block}.chat-head b{font-size:13px}.chat-head small{margin-top:3px;color:var(--muted);font-size:10px}.assistant-orb{display:grid;place-items:center;width:39px;height:39px;border-radius:14px 14px 14px 5px;color:#f7f3e8;background:linear-gradient(145deg,#225e49,#0f372a);font:600 18px var(--display)}.chat-stream{height:480px;overflow:auto;padding:24px;background:radial-gradient(circle at 85% 12%,rgba(214,233,221,.45),transparent 28%)}.message-row{display:flex;margin-bottom:16px}.message-row.user{justify-content:flex-end}.message-bubble{max-width:78%;padding:13px 15px 10px;border-radius:7px 18px 18px 18px;background:rgba(255,255,255,.87);box-shadow:0 8px 25px rgba(38,68,55,.07)}.message-row.user .message-bubble{border-radius:18px 7px 18px 18px;color:white;background:linear-gradient(145deg,#26795d,#14533f)}.message-bubble p{margin:0;white-space:pre-wrap;font-size:13px;line-height:1.75}.message-bubble small{display:block;margin-top:6px;color:var(--muted);font-size:9px}.message-row.user small{color:rgba(255,255,255,.65);text-align:right}.typing{display:flex;gap:5px;padding:17px 20px}.typing i{width:6px;height:6px;border-radius:50%;background:var(--muted);animation:pulse 1.1s infinite}.typing i:nth-child(2){animation-delay:.16s}.typing i:nth-child(3){animation-delay:.32s}.streaming{min-width:90px}.stream-caret{display:inline-block;width:2px;height:1em;margin-left:3px;vertical-align:-2px;background:var(--green);animation:blink .8s step-end infinite}@keyframes pulse{0%,70%,100%{opacity:.3;transform:translateY(0)}35%{opacity:1;transform:translateY(-4px)}}@keyframes blink{50%{opacity:0}}.quick-prompts{display:flex;gap:8px;overflow:auto;padding:0 20px 14px}.quick-prompts button{flex:none;padding:8px 11px;border:1px solid var(--line);border-radius:99px;color:#53635b;background:rgba(255,255,255,.55);font-size:10px}.quick-prompts button:hover{color:var(--green);border-color:rgba(23,107,80,.28)}.chat-compose{padding:16px 20px 18px;border-top:1px solid var(--line);background:var(--paper-soft)}.chat-compose>div{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-top:9px}.chat-compose small{color:var(--muted);font-size:9px}.confirmed-note{padding:18px 22px;color:var(--green);background:var(--mint);font-size:11px;text-align:center}.draft-panel{position:sticky;top:110px}.draft-title{display:flex;align-items:center;justify-content:space-between}.draft-title h3{margin:5px 0 14px;font:500 22px var(--display)}.draft-title strong{color:var(--green);font:500 27px var(--display)}.missing-box,.ready-box{display:flex;flex-wrap:wrap;gap:6px;margin:17px 0 4px;padding:12px;border-radius:13px}.missing-box{background:var(--seal)}.missing-box b{width:100%;color:#75562d;font-size:10px}.missing-box span{padding:4px 8px;border-radius:99px;color:#75562d;background:rgba(201,150,69,.14);font-size:9px}.ready-box{background:var(--mint);border:1px solid rgba(23,107,80,.12)}.ready-box b{width:100%;color:var(--green);font-size:11px}.ready-box span{color:#4e6258;font-size:10px;line-height:1.6}.draft-list{margin:12px 0 0}.draft-list>div{display:grid;grid-template-columns:92px 1fr;gap:10px;padding:11px 0;border-bottom:1px solid rgba(31,62,49,.075)}.draft-list dt{color:var(--muted);font-size:10px}.draft-list dd{margin:0;color:var(--ink);font-size:11px;line-height:1.55;text-align:right}.slot-summary{display:flex;flex-direction:column;gap:3px}.evidence-box{margin-top:14px;padding:11px 13px;border-radius:12px;background:var(--el-fill-color-light)}.evidence-box summary{color:var(--green);font-size:10px;font-weight:700;cursor:pointer}.evidence-box p{margin:9px 0 0;color:var(--muted);font-size:9px;line-height:1.5}.evidence-box p b{margin-right:6px;color:#42544a}.confirm-area{margin-top:18px}.confirm-area p{margin:0 0 11px;color:var(--muted);font-size:9px;line-height:1.6}.version-chip{margin-top:10px;color:var(--muted);font-size:9px;text-align:center}.manual-dialog-desc{margin:0 0 4px;color:var(--muted);font-size:11px;line-height:1.6}.manual-dialog-desc .tag{margin-left:8px}.manual-edit-dialog :deep(.el-dialog__body){max-height:68vh;overflow:auto;padding-top:12px}.manual-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:2px 24px}.wide{grid-column:1/-1}.field-help{display:block;margin-top:5px;color:var(--muted);font-size:9px}.manual-divider{display:flex;align-items:center;justify-content:space-between;gap:12px;margin:19px 0 14px;padding-top:17px;border-top:1px solid var(--line)}.manual-divider b{font:500 17px var(--display)}.manual-divider span{color:var(--muted);font-size:10px}.manual-divider>div b,.manual-divider>div span{display:block}.manual-divider>div span{margin-top:4px}.slot-row{display:grid;grid-template-columns:120px 145px 22px 145px 130px 56px;gap:9px;align-items:center;margin-bottom:10px}@media(max-width:1000px){.interview-layout{grid-template-columns:1fr}.draft-panel{position:static}.chat-stream{height:440px}}@media(max-width:700px){.head-actions{align-items:stretch;flex-direction:column}.chat-stream{height:410px;padding:16px}.message-bubble{max-width:90%}.manual-grid{grid-template-columns:1fr}.wide{grid-column:auto}.slot-row{grid-template-columns:1fr 1fr}.slot-row>span{display:none}.manual-divider{align-items:flex-start;flex-direction:column}.draft-list>div{grid-template-columns:82px 1fr}.manual-edit-dialog{width:94%!important}}
 .profile-evidence-grid{display:grid;grid-template-columns:1fr 1fr;gap:18px;margin-top:20px}.evidence-editor{min-width:0}.evidence-form{display:grid;gap:10px}.exception-form{grid-template-columns:175px 150px minmax(0,1fr) auto}.assessment-form{grid-template-columns:minmax(150px,1fr) 150px 175px}.assessment-form .el-input{grid-column:1/3}.assessment-form .el-button{grid-column:3}.evidence-form :deep(.el-date-editor),.evidence-form :deep(.el-input-number){width:100%}.evidence-list{display:grid;gap:7px;margin-top:14px}.evidence-list span{display:flex;justify-content:space-between;gap:12px;padding:9px 11px;border-radius:10px;background:var(--el-fill-color-light);color:var(--muted);font-size:10px}.evidence-list b{color:var(--ink)}@media(max-width:1180px){.profile-evidence-grid{grid-template-columns:1fr}.exception-form,.assessment-form{grid-template-columns:1fr 1fr}.assessment-form .el-input,.assessment-form .el-button{grid-column:auto}}@media(max-width:1000px){.profile-evidence-grid{grid-template-columns:1fr}.exception-form,.assessment-form{grid-template-columns:1fr 1fr}.assessment-form .el-input,.assessment-form .el-button{grid-column:auto}}@media(max-width:600px){.exception-form,.assessment-form{grid-template-columns:1fr}}
 .version-stack{display:block;width:100%;margin-top:14px;padding:13px 13px 17px;border:1px solid rgba(23,107,80,.14);border-radius:18px;background:linear-gradient(145deg,rgba(255,255,255,.9),rgba(226,239,231,.72));box-shadow:0 14px 34px rgba(39,74,58,.08);cursor:pointer;text-align:left;transition:.2s ease}

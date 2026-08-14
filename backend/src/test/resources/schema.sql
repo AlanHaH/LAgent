@@ -15,7 +15,21 @@ CREATE TABLE refresh_token (
  created_by BIGINT NOT NULL,updated_at TIMESTAMP NOT NULL,updated_by BIGINT NOT NULL,version INT NOT NULL DEFAULT 0,deleted_at TIMESTAMP
 );
 CREATE TABLE audit_log (id BIGINT PRIMARY KEY,request_id VARCHAR(100),operator_id BIGINT,operator_type VARCHAR(24),action VARCHAR(80),resource_type VARCHAR(80),resource_id VARCHAR(100),before_summary VARCHAR(2000),after_summary VARCHAR(2000),result VARCHAR(24),ip VARCHAR(64),created_at TIMESTAMP);
-CREATE TABLE learning_direction (id BIGINT PRIMARY KEY,parent_id BIGINT,code VARCHAR(80),name VARCHAR(120),status VARCHAR(24),sort_no INT,version INT DEFAULT 0,deleted_at TIMESTAMP);
+CREATE TABLE learning_direction (
+ id BIGINT PRIMARY KEY,parent_id BIGINT,code VARCHAR(80) NOT NULL UNIQUE,name VARCHAR(120) NOT NULL,
+ status VARCHAR(24) NOT NULL,sort_no INT NOT NULL,created_at TIMESTAMP,created_by BIGINT,
+ updated_at TIMESTAMP,updated_by BIGINT,version INT NOT NULL DEFAULT 0,deleted_at TIMESTAMP
+);
+CREATE TABLE knowledge_point (
+ id BIGINT PRIMARY KEY,direction_id BIGINT NOT NULL,parent_id BIGINT,code VARCHAR(80) NOT NULL,
+ name VARCHAR(120) NOT NULL,level INT NOT NULL,default_weight DECIMAL(8,4) NOT NULL,status VARCHAR(24) NOT NULL,
+ created_at TIMESTAMP,created_by BIGINT,updated_at TIMESTAMP,updated_by BIGINT,
+ version INT NOT NULL DEFAULT 0,deleted_at TIMESTAMP,UNIQUE(direction_id,code)
+);
+CREATE TABLE knowledge_dependency (
+ predecessor_id BIGINT NOT NULL,successor_id BIGINT NOT NULL,type VARCHAR(24) NOT NULL,
+ PRIMARY KEY(predecessor_id,successor_id)
+);
 CREATE TABLE user_profile (
  id BIGINT PRIMARY KEY,user_id BIGINT NOT NULL UNIQUE,timezone VARCHAR(80) NOT NULL,week_start INT NOT NULL,
  plan_start_date DATE NOT NULL,plan_end_date DATE NOT NULL,plan_period_days INT NOT NULL,background_text VARCHAR(2000),
@@ -37,6 +51,11 @@ CREATE TABLE availability_rule (
  id BIGINT PRIMARY KEY,user_id BIGINT NOT NULL,weekday INT NOT NULL,start_time TIME NOT NULL,end_time TIME NOT NULL,
  available_minutes INT NOT NULL,energy_level VARCHAR(24) NOT NULL,created_at TIMESTAMP NOT NULL,created_by BIGINT NOT NULL,
  updated_at TIMESTAMP NOT NULL,updated_by BIGINT NOT NULL,version INT NOT NULL DEFAULT 0,deleted_at TIMESTAMP
+);
+CREATE TABLE availability_exception (
+ id BIGINT PRIMARY KEY,user_id BIGINT NOT NULL,local_date DATE NOT NULL,available_minutes INT NOT NULL,reason VARCHAR(500),
+ created_at TIMESTAMP NOT NULL,created_by BIGINT NOT NULL,updated_at TIMESTAMP NOT NULL,updated_by BIGINT NOT NULL,
+ version INT NOT NULL DEFAULT 0,deleted_at TIMESTAMP,UNIQUE(user_id,local_date)
 );
 CREATE TABLE profile_interview_session (
  id BIGINT PRIMARY KEY,public_id VARCHAR(64) NOT NULL UNIQUE,user_id BIGINT NOT NULL,status VARCHAR(24) NOT NULL,
@@ -63,6 +82,25 @@ CREATE TABLE profile_version (
  id BIGINT PRIMARY KEY,profile_id BIGINT NOT NULL,version_no INT NOT NULL,snapshot_json JSON NOT NULL,
  confidence DECIMAL(5,4) NOT NULL,trigger_type VARCHAR(40) NOT NULL,trigger_event_id VARCHAR(100),
  created_at TIMESTAMP NOT NULL,created_by BIGINT NOT NULL,UNIQUE(profile_id,version_no)
+);
+CREATE TABLE learning_project (
+ id BIGINT PRIMARY KEY,public_id VARCHAR(64) NOT NULL UNIQUE,user_id BIGINT NOT NULL,primary_direction_id BIGINT,
+ name VARCHAR(120) NOT NULL,description VARCHAR(2000),start_date DATE NOT NULL,due_date DATE NOT NULL,
+ priority VARCHAR(20) NOT NULL,status VARCHAR(24) NOT NULL,deliverable_json VARCHAR(4000) NOT NULL,repository_url VARCHAR(500),
+ created_at TIMESTAMP NOT NULL,created_by BIGINT NOT NULL,updated_at TIMESTAMP NOT NULL,updated_by BIGINT NOT NULL,
+ version INT NOT NULL DEFAULT 0,deleted_at TIMESTAMP
+);
+CREATE TABLE milestone (
+ id BIGINT PRIMARY KEY,public_id VARCHAR(64) NOT NULL UNIQUE,project_id BIGINT NOT NULL,name VARCHAR(120) NOT NULL,
+ sequence_no INT NOT NULL,due_date DATE NOT NULL,weight DECIMAL(6,4) NOT NULL,status VARCHAR(24) NOT NULL,
+ acceptance_json VARCHAR(4000) NOT NULL,completion_evidence_json VARCHAR(8000),completed_at TIMESTAMP,
+ created_at TIMESTAMP NOT NULL,created_by BIGINT NOT NULL,updated_at TIMESTAMP NOT NULL,updated_by BIGINT NOT NULL,
+ version INT NOT NULL DEFAULT 0,deleted_at TIMESTAMP
+);
+CREATE TABLE outbox_event (
+ id BIGINT PRIMARY KEY,aggregate_type VARCHAR(80) NOT NULL,aggregate_id VARCHAR(100) NOT NULL,
+ event_type VARCHAR(100) NOT NULL,payload_json VARCHAR(8000) NOT NULL,correlation_id VARCHAR(100) NOT NULL,
+ status VARCHAR(24) NOT NULL,attempts INT NOT NULL,next_retry_at TIMESTAMP NOT NULL,created_at TIMESTAMP NOT NULL
 );
 CREATE TABLE model_run (
  id BIGINT PRIMARY KEY,public_id VARCHAR(64) NOT NULL UNIQUE,user_id BIGINT NOT NULL,purpose VARCHAR(40) NOT NULL,

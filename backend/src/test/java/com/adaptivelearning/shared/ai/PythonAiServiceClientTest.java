@@ -14,6 +14,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
+import java.time.LocalDate;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -27,6 +28,7 @@ class PythonAiServiceClientTest {
     private HttpServer server;
     private PythonAiServiceClient client;
     private final AtomicReference<String> receivedToken = new AtomicReference<>();
+    private final AtomicReference<String> receivedPlanBody = new AtomicReference<>();
 
     @BeforeEach
     void setUp() throws IOException {
@@ -71,6 +73,17 @@ class PythonAiServiceClientTest {
                     {"pageNo":1,"text":"第一页识别文字","confidence":0.96}],
                     "pageCount":1,"recognizedPages":1,"characterCount":8,
                     "averageConfidence":0.96,"engine":"rapidocr-onnxruntime"}}
+                    """);
+        });
+        server.createContext("/internal/v1/plans/recommendations", exchange -> {
+            receivedPlanBody.set(new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8));
+            json(exchange, """
+                    {"success":true,"data":{"tasks":[{
+                    "title":"Learn A before B","taskType":"LEARNING","priority":"HIGH",
+                    "estimatedMinutes":30,"knowledgePointIds":[1,2],"sourceChunkIds":[],
+                    "learningObjective":"Learn A before B","sourceQueries":[],
+                    "acceptanceCriteria":["Explain A before B"],"reason":"Preserve prerequisites"
+                    }],"promptVersion":"plan-recommendation-v4-prerequisites"}}
                     """);
         });
         server.start();
@@ -118,6 +131,7 @@ class PythonAiServiceClientTest {
                     assertThat(error.getUserMessage()).isEqualTo("模型 API 密钥无效或无权访问当前模型");
                     assertThat(error.getDetails()).containsEntry("providerStatus", 401L)
                             .containsEntry("providerCode", "invalid_api_key")
+                            .containsEntry("pythonCode", "AI_PROVIDER_AUTH_FAILED")
                             .doesNotContainKey("providerException");
                 });
     }
@@ -127,8 +141,12 @@ class PythonAiServiceClientTest {
         assertThatThrownBy(() -> client.profileTurnStreaming(
                 1L, "session-1", Map.of(), List.of(), List.of(), "我是初学者", ignored -> { }))
                 .isInstanceOfSatisfying(AiModelException.class, error ->
-                        assertThat(error.getCode()).isEqualTo(
-                            com.adaptivelearning.shared.exception.ErrorCode.MODEL_OUTPUT_INVALID));
+                        {
+                            assertThat(error.getCode()).isEqualTo(
+                                    com.adaptivelearning.shared.exception.ErrorCode.MODEL_OUTPUT_INVALID);
+                            assertThat(error.getDetails()).containsEntry("pythonCode", "AI_OUTPUT_INVALID")
+                                    .doesNotContainKey("validationErrors");
+                        });
     }
 
     @Test
@@ -145,6 +163,28 @@ class PythonAiServiceClientTest {
             assertThat(page.text()).isEqualTo("第一页识别文字");
         });
         assertThat(receivedToken.get()).isEqualTo(TOKEN);
+    }
+
+    @Test
+    void serializesKnowledgeDependenciesAndSatisfiedPrerequisites() throws Exception {
+        PythonAiServiceClient.PlanRecommendationRequest request =
+                new PythonAiServiceClient.PlanRecommendationRequest(
+                        1L, "Learn graphs", "Computer science", "BEGINNER",
+                        LocalDate.parse("2026-08-01"), LocalDate.parse("2026-08-30"), null,
+                        List.of(new PythonAiServiceClient.PlanKnowledgePoint(1L, "A"),
+                                new PythonAiServiceClient.PlanKnowledgePoint(2L, "B")),
+                        List.of(new PythonAiServiceClient.KnowledgeDependency(1L, 2L)),
+                        List.of(1L), List.of(), List.of(), 12,
+                        null, 600, false, 2);
+
+        PythonAiServiceClient.PlanRecommendationResult result = client.planRecommendations(request);
+
+        var body = new ObjectMapper().readTree(receivedPlanBody.get());
+        assertThat(body.path("knowledgeDependencies").path(0).path("predecessorId").asLong()).isEqualTo(1L);
+        assertThat(body.path("knowledgeDependencies").path(0).path("successorId").asLong()).isEqualTo(2L);
+        assertThat(body.path("satisfiedPrerequisiteIds").path(0).asLong()).isEqualTo(1L);
+        assertThat(result.tasks()).singleElement().satisfies(task ->
+                assertThat(task.knowledgePointIds()).containsExactly(1L, 2L));
     }
 
     private void json(HttpExchange exchange, String body) throws IOException {

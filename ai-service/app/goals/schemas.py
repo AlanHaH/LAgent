@@ -40,6 +40,11 @@ class GoalRecommendationRequest(BaseModel):
     preference: GoalPreferenceContext | None = None
     weekly_available_minutes: int = Field(alias="weeklyAvailableMinutes", ge=10, le=10080)
     existing_goal_names: list[str] = Field(default_factory=list, alias="existingGoalNames", max_length=100)
+    self_assessment_count: int = Field(default=0, alias="selfAssessmentCount", ge=0)
+    confidence: float = Field(default=0.1, ge=0, le=1)
+    recommended_difficulty: int = Field(default=1, alias="recommendedDifficulty", ge=1, le=5)
+    daily_recommended_tasks: int = Field(default=2, alias="dailyRecommendedTasks", ge=1, le=20)
+    risk_notices: list[str] = Field(default_factory=list, alias="riskNotices", max_length=20)
     count: int = Field(default=3, ge=1, le=3)
 
     @model_validator(mode="after")
